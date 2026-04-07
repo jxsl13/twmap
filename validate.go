@@ -28,8 +28,8 @@ var (
 //   - Exactly one game layer exists
 //   - All DDNet special layers (teleport, speedup, front, switch, tune)
 //     share the same dimensions as the game layer
-func Validate(r io.Reader) error {
-	m, err := Parse(r)
+func Validate(r io.Reader, opts ...ParseOption) error {
+	m, err := Parse(r, opts...)
 	if err != nil {
 		return err
 	}

@@ -291,3 +291,101 @@ func (df *datafile) itemsOfType(typeID uint16) []itemView {
 	}
 	return df.items[start:end]
 }
+
+// ── datafile writer ──────────────────────────────────────────────────────────
+
+// writeTo serialises the datafile back to the exact binary format.
+// For a datafile that was parsed with parseDatafile, this produces
+// byte-equal output.
+func (df *datafile) writeTo(w io.Writer) error {
+	// ── reconstruct items block ──────────────────────────────────────────
+	var itemsBuf bytes.Buffer
+	itemOffsets := make([]int32, len(df.items))
+	for i, item := range df.items {
+		itemOffsets[i] = int32(itemsBuf.Len())
+		// type_id (high 16 bits) | id (low 16 bits)
+		typeIDAndID := (int32(item.TypeID) << 16) | int32(item.ID)
+		size := int32(len(item.Data) * 4)
+		_ = binary.Write(&itemsBuf, binary.LittleEndian, typeIDAndID)
+		_ = binary.Write(&itemsBuf, binary.LittleEndian, size)
+		_ = binary.Write(&itemsBuf, binary.LittleEndian, item.Data)
+	}
+	sizeItems := int32(itemsBuf.Len())
+	sizeData := int32(len(df.rawData))
+
+	numItemTypes := int32(len(df.itemTypes))
+	numItems := int32(len(df.items))
+	numData := int32(df.numData)
+
+	// Swaplen covers everything from the numItemTypes field through the
+	// end of the items block. It does NOT include the size and swaplen
+	// fields themselves (first 8 bytes of headerRest) nor the raw data.
+	dataSizeEntries := int32(0)
+	if df.version >= datafileVersion4 {
+		dataSizeEntries = numData
+	}
+	swaplen := int32(5*4) + // numItemTypes..sizeData (5 fields)
+		numItemTypes*12 + // item types
+		numItems*4 + // item offsets
+		numData*4 + // data offsets
+		dataSizeEntries*4 + // data sizes (v4 only)
+		sizeItems
+	fileSize := swaplen + sizeData
+
+	// ── write version header ─────────────────────────────────────────────
+	hv := headerVersion{
+		Magic:   magic,
+		Version: df.version,
+	}
+	if err := binary.Write(w, binary.LittleEndian, &hv); err != nil {
+		return err
+	}
+
+	// ── write header rest ────────────────────────────────────────────────
+	hr := headerRest{
+		Size:         fileSize,
+		Swaplen:      swaplen,
+		NumItemTypes: numItemTypes,
+		NumItems:     numItems,
+		NumData:      numData,
+		SizeItems:    sizeItems,
+		SizeData:     sizeData,
+	}
+	if err := binary.Write(w, binary.LittleEndian, &hr); err != nil {
+		return err
+	}
+
+	// ── write item types ─────────────────────────────────────────────────
+	if err := binary.Write(w, binary.LittleEndian, df.itemTypes); err != nil {
+		return err
+	}
+
+	// ── write item offsets ───────────────────────────────────────────────
+	if err := binary.Write(w, binary.LittleEndian, itemOffsets); err != nil {
+		return err
+	}
+
+	// ── write data offsets ───────────────────────────────────────────────
+	if err := binary.Write(w, binary.LittleEndian, df.dataOffsets); err != nil {
+		return err
+	}
+
+	// ── write data sizes (v4 only) ───────────────────────────────────────
+	if df.version >= datafileVersion4 && df.dataSizes != nil {
+		if err := binary.Write(w, binary.LittleEndian, df.dataSizes); err != nil {
+			return err
+		}
+	}
+
+	// ── write items block ────────────────────────────────────────────────
+	if _, err := w.Write(itemsBuf.Bytes()); err != nil {
+		return err
+	}
+
+	// ── write data block ─────────────────────────────────────────────────
+	if _, err := w.Write(df.rawData); err != nil {
+		return err
+	}
+
+	return nil
+}

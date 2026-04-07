@@ -30,8 +30,8 @@ const tilesetGridSize = 16
 //   - Layer colors modulate the tileset/texture pixels
 //   - Quads are rasterized with barycentric interpolation (vertex colors + textures)
 //   - Physics/special layers and detail layers are excluded
-func Render(r io.Reader, maxWidth, maxHeight int) (*image.NRGBA, error) {
-	m, err := Parse(r)
+func Render(r io.Reader, maxWidth, maxHeight int, opts ...ParseOption) (*image.NRGBA, error) {
+	m, err := Parse(r, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
@@ -332,7 +332,11 @@ func prepareTilesets(m *Map, layers []renderLayer, tileLen uint32) map[int]*imag
 		src := m.Images[imgID]
 		srcRGBA := src.RGBA
 		if srcRGBA == nil && src.External {
-			srcRGBA = resolveExternalImage(src.Name)
+			if m.Version == MapVersion07 {
+				srcRGBA = resolveExternalImage07(src.Name)
+			} else {
+				srcRGBA = resolveExternalImage(src.Name)
+			}
 		}
 		if srcRGBA == nil || src.Width == 0 || src.Height == 0 {
 			// Image not available: solid white
@@ -392,7 +396,11 @@ func prepareQuadImages(m *Map, steps []renderStep) map[int]*image.NRGBA {
 		src := m.Images[imgID]
 		srcRGBA := src.RGBA
 		if srcRGBA == nil && src.External {
-			srcRGBA = resolveExternalImage(src.Name)
+			if m.Version == MapVersion07 {
+				srcRGBA = resolveExternalImage07(src.Name)
+			} else {
+				srcRGBA = resolveExternalImage(src.Name)
+			}
 		}
 		if srcRGBA == nil {
 			continue

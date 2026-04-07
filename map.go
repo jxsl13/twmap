@@ -11,11 +11,14 @@ import (
 // ── map item type IDs (from datafile spec) ───────────────────────────────────
 
 const (
-	mapItemTypeVersion uint16 = 0
-	mapItemTypeInfo    uint16 = 1
-	mapItemTypeImage   uint16 = 2
-	mapItemTypeGroup   uint16 = 4
-	mapItemTypeLayer   uint16 = 5
+	mapItemTypeVersion   uint16 = 0
+	mapItemTypeInfo      uint16 = 1
+	mapItemTypeImage     uint16 = 2
+	mapItemTypeEnvelope  uint16 = 3
+	mapItemTypeGroup     uint16 = 4
+	mapItemTypeLayer     uint16 = 5
+	mapItemTypeEnvPoints uint16 = 6
+	mapItemTypeSound     uint16 = 7
 )
 
 // ── layer type constants ─────────────────────────────────────────────────────
@@ -54,14 +57,101 @@ const (
 	TileFlagRotate uint8 = 8
 )
 
+// ── DDNet special tile types ─────────────────────────────────────────────────
+
+// TeleTile is a teleporter tile (DDNet).
+type TeleTile struct {
+	Number uint8
+	ID     uint8
+}
+
+// SpeedupTile is a speed-boost tile (DDNet).
+type SpeedupTile struct {
+	Force    uint8
+	MaxSpeed uint8
+	ID       uint8
+	Angle    int16
+}
+
+// SwitchTile is a switch tile (DDNet).
+type SwitchTile struct {
+	Number uint8
+	ID     uint8
+	Flags  uint8
+	Delay  uint8
+}
+
+// TuneTile is a tune-zone tile (DDNet).
+type TuneTile struct {
+	Number uint8
+	ID     uint8
+}
+
+// ── Envelope types ───────────────────────────────────────────────────────────
+
+// CurveType identifies the interpolation between envelope points.
+type CurveType int32
+
+const (
+	CurveStep   CurveType = 0
+	CurveLinear CurveType = 1
+	CurveSlow   CurveType = 2
+	CurveFast   CurveType = 3
+	CurveSmooth CurveType = 4
+	CurveBezier CurveType = 5
+)
+
+// EnvPoint represents a single control point in an envelope.
+type EnvPoint struct {
+	Time      int32 // milliseconds
+	CurveType CurveType
+	Values    [4]int32 // 22.10 fixed-point; meaning depends on envelope type
+}
+
+// Envelope represents an animation envelope (position, color, or sound).
+type Envelope struct {
+	Name         string
+	Channels     int32 // 1=sound, 3=position, 4=color
+	Synchronized bool
+	Points       []EnvPoint
+}
+
+// ── Sound types ──────────────────────────────────────────────────────────────
+
+// Sound is a sound resource stored in the map (DDNet only).
+type Sound struct {
+	Name string
+	Data []byte // opus encoded; nil for external sounds
+}
+
+// SoundSource represents a sound emitter in a sounds layer.
+type SoundSource struct {
+	Position       Point
+	Loop           bool
+	Panning        bool
+	Delay          int32 // seconds
+	Falloff        uint8
+	PosEnv         int32
+	PosEnvOffset   int32
+	SoundEnv       int32
+	SoundEnvOffset int32
+	ShapeType      int32 // 0=rectangle, 1=circle
+	ShapeWidth     int32 // 22.10 fxp (rect width or circle radius)
+	ShapeHeight    int32 // 22.10 fxp (rect height; unused for circle)
+}
+
 // ── Quad ─────────────────────────────────────────────────────────────────────
 
 // Quad represents a single quad in a quads layer.
 // Positions use 17.15 fixed-point.
 type Quad struct {
-	Points    [5]Point // corners[4] + position
-	Colors    [4]color.NRGBA
-	TexCoords [4]Point
+	Points         [5]Point // corners[4] + position
+	Colors         [4]color.NRGBA
+	TexCoords      [4]Point
+	PosEnv         int32
+	PosEnvOffset   int32
+	ColorEnv       int32
+	ColorEnvOffset int32
 }
 
 // Point is a 2D coordinate (fixed-point 17.15 in the datafile).
@@ -69,21 +159,37 @@ type Point struct {
 	X, Y float64
 }
 
+// ── Map version ──────────────────────────────────────────────────────────────
+
+// MapVersion identifies the Teeworlds map format variant.
+// The value corresponds to the CMapItemImage version found in the map:
+// version 1 images are used in TW 0.6/DDNet, version 2 in TW 0.7.
+type MapVersion int
+
+const (
+	MapVersion06 MapVersion = 1 // CMapItemImage v1 (Teeworlds 0.6 / DDNet)
+	MapVersion07 MapVersion = 2 // CMapItemImage v2 (Teeworlds 0.7)
+)
+
 // ── Map model (mirrors ddnet-rs/twmap TwMap) ─────────────────────────────────
 
 // Map holds all parsed information from a Teeworlds/DDNet map file.
 type Map struct {
-	Info   Info
-	Images []Image
-	Groups []Group
+	Version   MapVersion // MapVersion06 or MapVersion07
+	Info      Info
+	Images    []Image
+	Envelopes []Envelope
+	Groups    []Group
+	Sounds    []Sound // DDNet only
 }
 
 // Info holds map metadata.
 type Info struct {
-	Author  string
-	Version string
-	Credits string
-	License string
+	Author   string
+	Version  string
+	Credits  string
+	License  string
+	Settings []string // DDNet map commands/settings
 }
 
 // Image is either embedded (with RGBA pixel data) or external (name only).
@@ -142,20 +248,32 @@ type Layer struct {
 	Detail bool
 
 	// Tilemap fields (used when Kind is tiles/game/front/tele/speedup/switch/tune)
-	Width   int
-	Height  int
-	ColorR  uint8
-	ColorG  uint8
-	ColorB  uint8
-	ColorA  uint8
-	ImageID int // -1 = no image
-	Tiles   []Tile
+	Width          int
+	Height         int
+	ColorR         uint8
+	ColorG         uint8
+	ColorB         uint8
+	ColorA         uint8
+	ImageID        int   // -1 = no image
+	ColorEnv       int32 // envelope index, -1 = none
+	ColorEnvOffset int32
+	Tiles          []Tile
+
+	// DDNet special tile data (only set for the corresponding layer kind)
+	TeleTiles    []TeleTile
+	SpeedupTiles []SpeedupTile
+	SwitchTiles  []SwitchTile
+	TuneTiles    []TuneTile
 
 	// Quads fields (used when Kind is LayerKindQuads)
 	Quads       []Quad
 	QuadImageID int // -1 = no image
 
-	// Name (v3+ only)
+	// Sound layer fields (used when Kind is LayerKindSounds)
+	SoundSources []SoundSource
+	SoundID      int // index into Map.Sounds, -1 = no sound
+
+	// Name
 	Name string
 }
 
@@ -192,15 +310,36 @@ func (l *Layer) IsTilemap() bool {
 
 // ── Parse: construct Map from an io.Reader ───────────────────────────────────
 
+// ParseOption configures the map parser.
+type ParseOption func(*parseOptions)
+
+type parseOptions struct {
+	requireInfo bool
+}
+
+func defaultParseOptions() parseOptions {
+	return parseOptions{requireInfo: true}
+}
+
+// WithRequireInfo controls whether the parser returns an error when the
+// map info item is missing. Default is true.
+func WithRequireInfo(require bool) ParseOption {
+	return func(o *parseOptions) { o.requireInfo = require }
+}
+
 // Parse reads and parses a Teeworlds/DDNet map from r.
 // It fully decodes all tile data and embedded images so the returned Map
 // can be used for thumbnail generation.
-func Parse(r io.Reader) (*Map, error) {
+func Parse(r io.Reader, opts ...ParseOption) (*Map, error) {
 	df, err := parseDatafile(r)
 	if err != nil {
 		return nil, fmt.Errorf("datafile: %w", err)
 	}
-	return parseMap(df)
+	o := defaultParseOptions()
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return parseMap(df, &o)
 }
 
 // ParseInfo reads only the metadata (author, version, credits, license)
@@ -213,10 +352,10 @@ func ParseInfo(r io.Reader) (Info, error) {
 	if err := checkMapVersion(df); err != nil {
 		return Info{}, err
 	}
-	return parseInfo(df)
+	return parseInfo(df, true)
 }
 
-func parseMap(df *datafile) (*Map, error) {
+func parseMap(df *datafile, opts *parseOptions) (*Map, error) {
 	m := &Map{}
 
 	// ── version ──────────────────────────────────────────────────────────
@@ -225,18 +364,33 @@ func parseMap(df *datafile) (*Map, error) {
 	}
 
 	// ── info ─────────────────────────────────────────────────────────────
-	info, err := parseInfo(df)
+	info, err := parseInfo(df, opts.requireInfo)
 	if err != nil {
 		return nil, err
 	}
 	m.Info = info
 
 	// ── images ───────────────────────────────────────────────────────────
-	images, err := parseImages(df)
+	images, ver, err := parseImages(df)
 	if err != nil {
 		return nil, err
 	}
 	m.Images = images
+	m.Version = ver
+
+	// ── envelopes ────────────────────────────────────────────────────────
+	envelopes, err := parseEnvelopes(df)
+	if err != nil {
+		return nil, err
+	}
+	m.Envelopes = envelopes
+
+	// ── sounds (DDNet only) ──────────────────────────────────────────────
+	sounds, err := parseSounds(df)
+	if err != nil {
+		return nil, err
+	}
+	m.Sounds = sounds
 
 	// ── groups & layers ──────────────────────────────────────────────────
 	groups, err := parseGroups(df)
@@ -267,10 +421,13 @@ func checkMapVersion(df *datafile) error {
 
 // ── info parsing ─────────────────────────────────────────────────────────────
 
-func parseInfo(df *datafile) (Info, error) {
+func parseInfo(df *datafile, requireInfo bool) (Info, error) {
 	item := df.findItem(mapItemTypeInfo, 0)
 	if item == nil {
-		return Info{}, ErrMissingInfo
+		if requireInfo {
+			return Info{}, ErrMissingInfo
+		}
+		return Info{}, nil
 	}
 	if len(item.Data) < 5 {
 		return Info{}, fmt.Errorf("info item too short: %d int32s, want >= 5", len(item.Data))
@@ -291,27 +448,64 @@ func parseInfo(df *datafile) (Info, error) {
 		return string(data)
 	}
 
-	return Info{
+	info := Info{
 		Author:  readStr(item.Data[1]),
 		Version: readStr(item.Data[2]),
 		Credits: readStr(item.Data[3]),
 		License: readStr(item.Data[4]),
-	}, nil
+	}
+
+	// DDNet settings (item version 1, 6th field)
+	if len(item.Data) >= 6 {
+		settingsIdx := item.Data[5]
+		if settingsIdx >= 0 && int(settingsIdx) < df.numData {
+			rawSettings, err := df.readData(int(settingsIdx))
+			if err == nil && len(rawSettings) > 0 {
+				info.Settings = parseCStringArray(rawSettings)
+			}
+		}
+	}
+
+	return info, nil
+}
+
+// parseCStringArray splits a NUL-delimited byte sequence into strings.
+func parseCStringArray(data []byte) []string {
+	var result []string
+	var cur []byte
+	for _, b := range data {
+		if b == 0 {
+			if len(cur) > 0 {
+				result = append(result, string(cur))
+				cur = cur[:0]
+			}
+		} else {
+			cur = append(cur, b)
+		}
+	}
+	if len(cur) > 0 {
+		result = append(result, string(cur))
+	}
+	return result
 }
 
 // ── image parsing ────────────────────────────────────────────────────────────
 
-func parseImages(df *datafile) ([]Image, error) {
+func parseImages(df *datafile) ([]Image, MapVersion, error) {
 	items := df.itemsOfType(mapItemTypeImage)
 	images := make([]Image, 0, len(items))
+	mapVer := MapVersion06
 
 	for i, item := range items {
 		if len(item.Data) < 6 {
-			return nil, fmt.Errorf("image %d: too short (%d int32s)", i, len(item.Data))
+			return nil, 0, fmt.Errorf("image %d: too short (%d int32s)", i, len(item.Data))
 		}
-		ver := item.Data[0]
-		if ver < 1 {
-			return nil, fmt.Errorf("image %d: invalid version %d", i, ver)
+		ver := MapVersion(item.Data[0])
+		if ver < MapVersion06 {
+			return nil, 0, fmt.Errorf("image %d: invalid version %d", i, ver)
+		}
+		if ver >= MapVersion07 {
+			mapVer = MapVersion07
 		}
 
 		width := int(item.Data[1])
@@ -320,13 +514,21 @@ func parseImages(df *datafile) ([]Image, error) {
 		nameIdx := item.Data[4]
 		dataIdx := item.Data[5]
 
+		// TW 0.7 image variant: 0=RGB, 1=RGBA (default for v1)
+		bytesPerPixel := 4
+		if ver >= MapVersion07 && len(item.Data) >= 7 {
+			if item.Data[6] == 0 {
+				bytesPerPixel = 3 // RGB
+			}
+		}
+
 		// Validate embedded image dimensions
 		if !external {
 			if width <= 0 {
-				return nil, fmt.Errorf("image %d: invalid width %d", i, width)
+				return nil, 0, fmt.Errorf("image %d: invalid width %d", i, width)
 			}
 			if height <= 0 {
-				return nil, fmt.Errorf("image %d: invalid height %d", i, height)
+				return nil, 0, fmt.Errorf("image %d: invalid height %d", i, height)
 			}
 		}
 
@@ -349,19 +551,31 @@ func parseImages(df *datafile) ([]Image, error) {
 			External: external,
 		}
 
-		// Decode embedded image data (RGBA pixels)
+		// Decode embedded image data
 		if !external && dataIdx >= 0 && int(dataIdx) < df.numData {
 			pixelData, err := df.readData(int(dataIdx))
-			if err == nil && len(pixelData) == width*height*4 {
+			if err == nil && len(pixelData) == width*height*bytesPerPixel {
 				nrgba := image.NewNRGBA(image.Rect(0, 0, width, height))
-				copy(nrgba.Pix, pixelData)
+				if bytesPerPixel == 4 {
+					copy(nrgba.Pix, pixelData)
+				} else {
+					// Convert RGB to NRGBA
+					for j := 0; j < width*height; j++ {
+						src := j * 3
+						dst := j * 4
+						nrgba.Pix[dst] = pixelData[src]
+						nrgba.Pix[dst+1] = pixelData[src+1]
+						nrgba.Pix[dst+2] = pixelData[src+2]
+						nrgba.Pix[dst+3] = 255
+					}
+				}
 				img.RGBA = nrgba
 			}
 		}
 
 		images = append(images, img)
 	}
-	return images, nil
+	return images, mapVer, nil
 }
 
 // ── group & layer parsing ────────────────────────────────────────────────────
@@ -449,8 +663,10 @@ func parseLayer(df *datafile, item *itemView) (Layer, error) {
 		return parseTilemapLayer(df, item.Data, flags)
 	case layerTypeQuads:
 		return parseQuadsLayer(df, item.Data)
-	case layerTypeDdraceSounds, layerTypeDdraceSoundsLegacy:
-		return Layer{Kind: LayerKindSounds}, nil
+	case layerTypeDdraceSounds:
+		return parseSoundsLayer(df, item.Data, false)
+	case layerTypeDdraceSoundsLegacy:
+		return parseSoundsLayer(df, item.Data, true)
 	default:
 		return Layer{Kind: LayerKindInvalid}, nil
 	}
@@ -480,14 +696,16 @@ func parseTilemapLayer(df *datafile, data []int32, layerFlags uint32) (Layer, er
 	detail := layerFlags&1 != 0
 
 	l := Layer{
-		Width:   width,
-		Height:  height,
-		Detail:  detail,
-		ColorR:  uint8(data[7]),
-		ColorG:  uint8(data[8]),
-		ColorB:  uint8(data[9]),
-		ColorA:  uint8(data[10]),
-		ImageID: int(data[13]),
+		Width:          width,
+		Height:         height,
+		Detail:         detail,
+		ColorR:         uint8(data[7]),
+		ColorG:         uint8(data[8]),
+		ColorB:         uint8(data[9]),
+		ColorA:         uint8(data[10]),
+		ColorEnv:       data[11],
+		ColorEnvOffset: data[12],
+		ImageID:        int(data[13]),
 	}
 
 	// Determine kind from tile flags
@@ -508,30 +726,84 @@ func parseTilemapLayer(df *datafile, data []int32, layerFlags uint32) (Layer, er
 		l.Kind = LayerKindTiles
 	}
 
-	// Determine which data index to read based on version and kind.
-	dataIdx := 14 // base data index
-	if l.Kind == LayerKindTiles || l.Kind == LayerKindGame {
-		// For regular tile layers and game layer, data is always at index 14
-		dataIdx = 14
-	} else if ver >= 3 {
-		// v3+: name[3] at [15..17], then special data indices follow
-		dataIdx = specialDataOffset(ver, tileFlags)
-	} else {
-		dataIdx = specialDataOffset(ver, tileFlags)
-	}
-
 	// v3: name
 	if ver >= 3 && len(data) >= 18 {
 		l.Name = parseI32String(data[15:18])
 	}
 
-	// Decode tile data
-	if dataIdx >= 0 && dataIdx < len(data) {
-		rawIdx := data[dataIdx]
-		if rawIdx >= 0 && int(rawIdx) < df.numData {
-			tileData, err := df.readData(int(rawIdx))
-			if err == nil {
-				l.Tiles = decodeTiles(tileData, width*height, l.Kind, ver)
+	totalTiles := width * height
+
+	// Read base tile data (data[14]) for game/tiles/front layers and as
+	// vanilla-compat dummy for DDNet physics layers.
+	readBaseTiles := func() {
+		rawIdx := data[14]
+		if rawIdx < 0 || int(rawIdx) >= df.numData {
+			return
+		}
+		tileData, err := df.readData(int(rawIdx))
+		if err != nil {
+			return
+		}
+		l.Tiles = decodeTiles(tileData, totalTiles, l.Kind, ver)
+	}
+
+	switch l.Kind {
+	case LayerKindTiles, LayerKindGame:
+		readBaseTiles()
+	case LayerKindFront:
+		// Front layer: actual tile data is in the DDNet front data index
+		frontIdx := specialDataOffset(ver, tileFlags)
+		if frontIdx >= 0 && frontIdx < len(data) {
+			rawIdx := data[frontIdx]
+			if rawIdx >= 0 && int(rawIdx) < df.numData {
+				tileData, err := df.readData(int(rawIdx))
+				if err == nil {
+					l.Tiles = decodeTiles(tileData, totalTiles, l.Kind, ver)
+				}
+			}
+		}
+	case LayerKindTele:
+		teleIdx := specialDataOffset(ver, tileFlags)
+		if teleIdx >= 0 && teleIdx < len(data) {
+			rawIdx := data[teleIdx]
+			if rawIdx >= 0 && int(rawIdx) < df.numData {
+				tileData, err := df.readData(int(rawIdx))
+				if err == nil {
+					l.TeleTiles = decodeTeleTiles(tileData, totalTiles)
+				}
+			}
+		}
+	case LayerKindSpeedup:
+		speedupIdx := specialDataOffset(ver, tileFlags)
+		if speedupIdx >= 0 && speedupIdx < len(data) {
+			rawIdx := data[speedupIdx]
+			if rawIdx >= 0 && int(rawIdx) < df.numData {
+				tileData, err := df.readData(int(rawIdx))
+				if err == nil {
+					l.SpeedupTiles = decodeSpeedupTiles(tileData, totalTiles)
+				}
+			}
+		}
+	case LayerKindSwitch:
+		switchIdx := specialDataOffset(ver, tileFlags)
+		if switchIdx >= 0 && switchIdx < len(data) {
+			rawIdx := data[switchIdx]
+			if rawIdx >= 0 && int(rawIdx) < df.numData {
+				tileData, err := df.readData(int(rawIdx))
+				if err == nil {
+					l.SwitchTiles = decodeSwitchTiles(tileData, totalTiles)
+				}
+			}
+		}
+	case LayerKindTune:
+		tuneIdx := specialDataOffset(ver, tileFlags)
+		if tuneIdx >= 0 && tuneIdx < len(data) {
+			rawIdx := data[tuneIdx]
+			if rawIdx >= 0 && int(rawIdx) < df.numData {
+				tileData, err := df.readData(int(rawIdx))
+				if err == nil {
+					l.TuneTiles = decodeTuneTiles(tileData, totalTiles)
+				}
 			}
 		}
 	}
@@ -609,6 +881,314 @@ func decompressTWTiles(data []byte) []byte {
 		}
 	}
 	return out
+}
+
+// decodeTeleTiles decodes 2-byte TeleTile entries: [number, id].
+func decodeTeleTiles(data []byte, expectedCount int) []TeleTile {
+	const size = 2
+	if len(data) < expectedCount*size {
+		return nil
+	}
+	tiles := make([]TeleTile, expectedCount)
+	for i := range expectedCount {
+		off := i * size
+		tiles[i] = TeleTile{
+			Number: data[off],
+			ID:     data[off+1],
+		}
+	}
+	return tiles
+}
+
+// decodeSpeedupTiles decodes 6-byte SpeedupTile entries:
+// [force, max_speed, id, padding, angle_lo, angle_hi].
+func decodeSpeedupTiles(data []byte, expectedCount int) []SpeedupTile {
+	const size = 6
+	if len(data) < expectedCount*size {
+		return nil
+	}
+	tiles := make([]SpeedupTile, expectedCount)
+	for i := range expectedCount {
+		off := i * size
+		tiles[i] = SpeedupTile{
+			Force:    data[off],
+			MaxSpeed: data[off+1],
+			ID:       data[off+2],
+			Angle:    int16(binary.LittleEndian.Uint16(data[off+4 : off+6])),
+		}
+	}
+	return tiles
+}
+
+// decodeSwitchTiles decodes 4-byte SwitchTile entries: [number, id, flags, delay].
+func decodeSwitchTiles(data []byte, expectedCount int) []SwitchTile {
+	const size = 4
+	if len(data) < expectedCount*size {
+		return nil
+	}
+	tiles := make([]SwitchTile, expectedCount)
+	for i := range expectedCount {
+		off := i * size
+		tiles[i] = SwitchTile{
+			Number: data[off],
+			ID:     data[off+1],
+			Flags:  data[off+2],
+			Delay:  data[off+3],
+		}
+	}
+	return tiles
+}
+
+// decodeTuneTiles decodes 2-byte TuneTile entries: [number, id].
+func decodeTuneTiles(data []byte, expectedCount int) []TuneTile {
+	const size = 2
+	if len(data) < expectedCount*size {
+		return nil
+	}
+	tiles := make([]TuneTile, expectedCount)
+	for i := range expectedCount {
+		off := i * size
+		tiles[i] = TuneTile{
+			Number: data[off],
+			ID:     data[off+1],
+		}
+	}
+	return tiles
+}
+
+// parseSoundsLayer parses a sounds layer (DDNet only).
+// legacy=true for the deprecated sound source format (type 9).
+func parseSoundsLayer(df *datafile, data []int32, legacy bool) (Layer, error) {
+	// data[0]=layerVersion, [1]=type, [2]=flags
+	// data[3]=soundsVersion, [4]=numSources, [5]=dataIdx, [6]=soundIdx, [7..9]=name
+	if len(data) < 7 {
+		return Layer{}, fmt.Errorf("sounds layer too short (%d int32s)", len(data))
+	}
+
+	numSources := int(data[4])
+	if numSources < 0 {
+		return Layer{}, fmt.Errorf("invalid num_sources %d", numSources)
+	}
+
+	dataIdx := data[5]
+	soundIdx := int(data[6])
+	detail := uint32(data[2])&1 != 0
+
+	l := Layer{
+		Kind:    LayerKindSounds,
+		Detail:  detail,
+		SoundID: soundIdx,
+	}
+
+	// name
+	if len(data) >= 10 {
+		l.Name = parseI32String(data[7:10])
+	}
+
+	if dataIdx >= 0 && int(dataIdx) < df.numData && numSources > 0 {
+		srcData, err := df.readData(int(dataIdx))
+		if err == nil {
+			if legacy {
+				l.SoundSources = decodeSoundSourcesLegacy(srcData, numSources)
+			} else {
+				l.SoundSources = decodeSoundSources(srcData, numSources)
+			}
+		}
+	}
+
+	return l, nil
+}
+
+const soundSourceSize = 52       // 13 int32s
+const soundSourceLegacySize = 36 // 9 int32s
+
+func decodeSoundSources(data []byte, numSources int) []SoundSource {
+	if len(data) < numSources*soundSourceSize {
+		return nil
+	}
+	sources := make([]SoundSource, numSources)
+	for i := range numSources {
+		off := i * soundSourceSize
+		sources[i] = SoundSource{
+			Position:       readPoint(data[off:]),
+			Loop:           readI32(data[off+8:]) != 0,
+			Panning:        readI32(data[off+12:]) != 0,
+			Delay:          readI32(data[off+16:]),
+			Falloff:        uint8(readI32(data[off+20:])),
+			PosEnv:         readI32(data[off+24:]),
+			PosEnvOffset:   readI32(data[off+28:]),
+			SoundEnv:       readI32(data[off+32:]),
+			SoundEnvOffset: readI32(data[off+36:]),
+			ShapeType:      readI32(data[off+40:]),
+			ShapeWidth:     readI32(data[off+44:]),
+			ShapeHeight:    readI32(data[off+48:]),
+		}
+	}
+	return sources
+}
+
+func decodeSoundSourcesLegacy(data []byte, numSources int) []SoundSource {
+	if len(data) < numSources*soundSourceLegacySize {
+		return nil
+	}
+	sources := make([]SoundSource, numSources)
+	for i := range numSources {
+		off := i * soundSourceLegacySize
+		radius := readI32(data[off+16:])
+		sources[i] = SoundSource{
+			Position:       readPoint(data[off:]),
+			Loop:           readI32(data[off+8:]) != 0,
+			Panning:        true,
+			Delay:          readI32(data[off+12:]),
+			Falloff:        0,
+			PosEnv:         readI32(data[off+20:]),
+			PosEnvOffset:   readI32(data[off+24:]),
+			SoundEnv:       readI32(data[off+28:]),
+			SoundEnvOffset: readI32(data[off+32:]),
+			ShapeType:      1, // circle
+			ShapeWidth:     radius,
+			ShapeHeight:    0,
+		}
+	}
+	return sources
+}
+
+func readI32(data []byte) int32 {
+	return int32(binary.LittleEndian.Uint32(data[0:4]))
+}
+
+// ── envelope parsing ─────────────────────────────────────────────────────────
+
+func parseEnvelopes(df *datafile) ([]Envelope, error) {
+	envItems := df.itemsOfType(mapItemTypeEnvelope)
+	if len(envItems) == 0 {
+		return nil, nil
+	}
+
+	// Check if any envelope has version >= 3 (TW 0.7 bezier).
+	// This changes the size of envelope points from 6 to 22 int32s.
+	hasBezier := false
+	for _, item := range envItems {
+		if len(item.Data) >= 1 && item.Data[0] >= 3 {
+			hasBezier = true
+			break
+		}
+	}
+
+	// Parse all envelope points
+	allPoints, err := parseEnvPoints(df, hasBezier)
+	if err != nil {
+		return nil, err
+	}
+
+	envelopes := make([]Envelope, 0, len(envItems))
+	for i, item := range envItems {
+		if len(item.Data) < 5 {
+			return nil, fmt.Errorf("envelope %d: too short (%d int32s)", i, len(item.Data))
+		}
+		ver := item.Data[0]
+		channels := item.Data[1]
+		startPoint := int(item.Data[2])
+		numPoints := int(item.Data[3])
+
+		env := Envelope{
+			Channels: channels,
+		}
+
+		// name (8 int32s, starting at index 4)
+		if len(item.Data) >= 12 {
+			env.Name = parseI32String(item.Data[4:12])
+		}
+
+		// v2: synchronized flag
+		if ver >= 2 && len(item.Data) >= 13 {
+			env.Synchronized = item.Data[12] != 0
+		}
+
+		// Extract this envelope's points from the global array
+		if startPoint >= 0 && numPoints > 0 && startPoint+numPoints <= len(allPoints) {
+			env.Points = allPoints[startPoint : startPoint+numPoints]
+		}
+
+		envelopes = append(envelopes, env)
+	}
+	return envelopes, nil
+}
+
+func parseEnvPoints(df *datafile, hasBezier bool) ([]EnvPoint, error) {
+	pointItem := df.findItem(mapItemTypeEnvPoints, 0)
+	if pointItem == nil {
+		return nil, nil
+	}
+
+	pointSize := 6 // standard: time, curvetype, values[4]
+	if hasBezier {
+		pointSize = 22 // 6 + 16 bezier tangent values
+	}
+
+	numPoints := len(pointItem.Data) / pointSize
+	if numPoints == 0 {
+		return nil, nil
+	}
+
+	points := make([]EnvPoint, numPoints)
+	for i := range numPoints {
+		base := i * pointSize
+		if base+6 > len(pointItem.Data) {
+			break
+		}
+		points[i] = EnvPoint{
+			Time:      pointItem.Data[base],
+			CurveType: CurveType(pointItem.Data[base+1]),
+			Values: [4]int32{
+				pointItem.Data[base+2],
+				pointItem.Data[base+3],
+				pointItem.Data[base+4],
+				pointItem.Data[base+5],
+			},
+		}
+	}
+	return points, nil
+}
+
+// ── sound item parsing (DDNet only) ──────────────────────────────────────────
+
+func parseSounds(df *datafile) ([]Sound, error) {
+	items := df.itemsOfType(mapItemTypeSound)
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	sounds := make([]Sound, 0, len(items))
+	for i, item := range items {
+		if len(item.Data) < 5 {
+			return nil, fmt.Errorf("sound %d: too short (%d int32s)", i, len(item.Data))
+		}
+		// item.Data[0]=version, [1]=external, [2]=nameIdx, [3]=dataIdx, [4]=dataSize
+		nameIdx := item.Data[2]
+		dataIdx := item.Data[3]
+
+		name := ""
+		if nameIdx >= 0 && int(nameIdx) < df.numData {
+			nameData, err := df.readData(int(nameIdx))
+			if err == nil && len(nameData) > 0 {
+				if nameData[len(nameData)-1] == 0 {
+					nameData = nameData[:len(nameData)-1]
+				}
+				name = string(nameData)
+			}
+		}
+
+		s := Sound{Name: name}
+		if dataIdx >= 0 && int(dataIdx) < df.numData {
+			sndData, err := df.readData(int(dataIdx))
+			if err == nil {
+				s.Data = sndData
+			}
+		}
+		sounds = append(sounds, s)
+	}
+	return sounds, nil
 }
 
 // parseI32String decodes a Teeworlds "3 x int32" encoded string (big-endian, XOR 128).
@@ -729,6 +1309,12 @@ func decodeQuads(data []byte, numQuads int) []Quad {
 			q.TexCoords[i] = readTexCoord(data[off:])
 			off += pointSize
 		}
+
+		// envelope references (4 int32s)
+		q.PosEnv = readI32(data[off:])
+		q.PosEnvOffset = readI32(data[off+4:])
+		q.ColorEnv = readI32(data[off+8:])
+		q.ColorEnvOffset = readI32(data[off+12:])
 
 		quads[qi] = q
 	}

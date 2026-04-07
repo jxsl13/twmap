@@ -47,6 +47,23 @@ func resolveExternalImage(name string) *image.NRGBA {
 	return img
 }
 
+// resolveExternalImage07 looks up an external image for a 0.7 map.
+// It first tries the 0.7-specific variant (name_0.7), then falls
+// back to the base name.
+func resolveExternalImage07(name string) *image.NRGBA {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return nil
+	}
+	externalMu.RLock()
+	img := externalImages[key+"_0.7"]
+	if img == nil {
+		img = externalImages[key]
+	}
+	externalMu.RUnlock()
+	return img
+}
+
 // toNRGBA converts any image.Image to *image.NRGBA.
 func toNRGBA(src image.Image) *image.NRGBA {
 	if nrgba, ok := src.(*image.NRGBA); ok {
