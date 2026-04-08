@@ -3,21 +3,24 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/jxsl13/twmap.svg)](https://pkg.go.dev/github.com/jxsl13/twmap)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Package `twmap` implements parsing, validation, and thumbnail generation for
-**Teeworlds 0.6.x** and **DDNet** map files.
+Package `twmap` implements parsing, writing, validation, and thumbnail
+generation for **Teeworlds 0.6**, **Teeworlds 0.7**, and **DDNet** map files.
 
 The Teeworlds map format is a "datafile" container holding typed items
 (metadata) and zlib-compressed data blocks (tile data, image data, etc.).
-This package fully decodes all tile data, embedded images, quad layers, and
-map metadata, producing an in-memory `Map` struct suitable for inspection,
-validation, or rendering.
+This package fully decodes all tile data, embedded images, quad layers,
+envelopes, sounds, and map metadata, producing an in-memory `Map` struct
+suitable for inspection, modification, writing, validation, or rendering.
 
 ## Features
 
 - **Parse** — fully decode a `.map` file into groups, layers, tiles, quads,
-  images, and metadata.
+  images, envelopes, sounds, and metadata. Supports both 0.6/DDNet and 0.7
+  map formats (auto-detected from image item versions).
 - **ParseInfo** — extract only map metadata (author, version, credits,
-  license) without decoding layers or images.
+  license, DDNet settings) without decoding layers or images.
+- **Write** — serialise a `Map` back into the Teeworlds datafile (v4)
+  format, producing output loadable by TW/DDNet clients.
 - **Validate** — verify structural integrity: checks the datafile container,
   map version, game layer presence, and DDNet special-layer consistency.
 - **Render / RenderMap** — generate an `image.NRGBA` thumbnail with
@@ -28,6 +31,9 @@ validation, or rendering.
   blank import (like `image/png` and `image/jpeg`).
 - **RegisterExternalImage** — public API for registering custom tilesets
   from your own packages.
+- **Game-layer tile IDs** — exported constants for all DDNet game-layer
+  tile types (`TileAir`, `TileSolid`, `TileFreeze`, …) and helper
+  functions (`IsSolid`, `IsPassable`).
 
 ## Installation
 
@@ -64,6 +70,7 @@ func main() {
     }
 
     fmt.Println("Author:", m.Info.Author)
+    fmt.Println("Version:", m.Version) // MapVersion06 or MapVersion07
     fmt.Println("Groups:", len(m.Groups))
     fmt.Println("Images:", len(m.Images))
 
@@ -83,22 +90,29 @@ func main() {
 
 ### Parsing
 
-| Function                               | Description                                                                |
-| -------------------------------------- | -------------------------------------------------------------------------- |
-| `Parse(r io.Reader) (*Map, error)`     | Full parse — decodes all items, layers, tiles, quads, and embedded images. |
-| `ParseInfo(r io.Reader) (Info, error)` | Lightweight parse — extracts only map metadata.                            |
+| Function                                                 | Description                                                                |
+| -------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `Parse(r io.Reader, opts ...ParseOption) (*Map, error)`  | Full parse — decodes all items, layers, tiles, quads, and embedded images. |
+| `ParseInfo(r io.Reader) (Info, error)`                   | Lightweight parse — extracts only map metadata.                            |
+| `WithRequireInfo(require bool) ParseOption`              | Controls whether a missing info item is an error (default: `true`).        |
+
+### Writing
+
+| Function                         | Description                                                                  |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| `(*Map).Write(w io.Writer) error` | Serialise the map into the Teeworlds datafile (v4) format, written to `w`. |
 
 ### Validation
 
-| Function                      | Description                                                  |
-| ----------------------------- | ------------------------------------------------------------ |
-| `Validate(r io.Reader) error` | Parses and validates the structural integrity of a map file. |
+| Function                                          | Description                                                  |
+| ------------------------------------------------- | ------------------------------------------------------------ |
+| `Validate(r io.Reader, opts ...ParseOption) error` | Parses and validates the structural integrity of a map file. |
 
 **Validation checks:**
 
 - Datafile container integrity (magic bytes, header, compressed data)
 - Map version is 1
-- Info item present with required fields
+- Info item present with required fields (configurable via `WithRequireInfo`)
 - All groups and layers parse successfully
 - All images parse successfully
 - Exactly one game layer exists
@@ -107,11 +121,11 @@ func main() {
 
 ### Rendering
 
-| Function                                                    | Description                                  |
-| ----------------------------------------------------------- | -------------------------------------------- |
-| `Render(r io.Reader, maxW, maxH int) (*image.NRGBA, error)` | Parse + render in one step.                  |
-| `RenderMap(m *Map, maxW, maxH int) (*image.NRGBA, error)`   | Render from an already-parsed `Map`.         |
-| `RegisterExternalImage(name string, img *image.NRGBA)`      | Register a tileset for use during rendering. |
+| Function                                                                      | Description                                  |
+| ----------------------------------------------------------------------------- | -------------------------------------------- |
+| `Render(r io.Reader, maxW, maxH int, opts ...ParseOption) (*image.NRGBA, error)` | Parse + render in one step.              |
+| `RenderMap(m *Map, maxW, maxH int) (*image.NRGBA, error)`                     | Render from an already-parsed `Map`.         |
+| `RegisterExternalImage(name string, img *image.NRGBA)`                        | Register a tileset for use during rendering. |
 
 To make the default DDNet/Teeworlds tilesets available, add a blank import:
 
@@ -140,15 +154,29 @@ the same way.
 
 ```text
 Map
-├── Info        — Author, Version, Credits, License
-├── Images[]    — Name, Width, Height, External, RGBA
-└── Groups[]    — Name, Offset, Parallax, Clipping, ClipRect
+├── Version        — MapVersion06 (0.6/DDNet) or MapVersion07 (0.7)
+├── Info           — Author, Version, Credits, License, Settings
+├── Images[]       — Name, Width, Height, External, RGBA
+├── Envelopes[]    — Name, Channels, Synchronized, Points[]
+│   └── EnvPoint   — Time, CurveType, Values[4]
+├── Sounds[]       — Name, Data (DDNet only)
+└── Groups[]       — Name, Offset, Parallax, Clipping, ClipRect
     └── Layers[]
-        ├── Tile layers  — Width, Height, Color, ImageID, Tiles[]
-        │   └── Tile     — ID, Flags
-        └── Quad layers  — Quads[], QuadImageID
-            └── Quad     — Points[5], Colors[4], TexCoords[4]
+        ├── Tile layers   — Name, Width, Height, Color, ImageID, ColorEnv, Detail, Tiles[]
+        │   └── Tile      — ID, Flags
+        ├── DDNet layers  — TeleTiles[], SpeedupTiles[], SwitchTiles[], TuneTiles[]
+        ├── Quad layers   — Name, Quads[], QuadImageID
+        │   └── Quad      — Points[5], Colors[4], TexCoords[4], PosEnv, ColorEnv
+        └── Sound layers  — Name, SoundSources[], SoundID
+            └── SoundSource — Position, Loop, Panning, Delay, Falloff, Shape, Envelopes
 ```
+
+#### Map version
+
+| Constant       | Value | Description                     |
+| -------------- | ----- | ------------------------------- |
+| `MapVersion06` | 1     | Teeworlds 0.6 / DDNet          |
+| `MapVersion07` | 2     | Teeworlds 0.7                  |
 
 #### Layer kinds
 
@@ -163,6 +191,16 @@ Map
 | `LayerKindTune`    | DDNet tune layer             |
 | `LayerKindQuads`   | Quad layer                   |
 | `LayerKindSounds`  | Sound layer                  |
+| `LayerKindInvalid` | Unrecognised layer type      |
+
+#### Helper methods
+
+| Method / Function              | Description                                               |
+| ------------------------------ | --------------------------------------------------------- |
+| `(*Layer).IsPhysics() bool`    | True for game/front/tele/speedup/switch/tune layers.      |
+| `(*Layer).IsTilemap() bool`    | True for any tilemap-based layer (physics or regular).    |
+| `(*Map).GameLayers() []Layer`  | Returns all game layers found in the map.                 |
+| `(*Group).IsPhysicsGroup() bool` | True if the group contains any physics layers.          |
 
 #### Tile flags
 
@@ -172,6 +210,28 @@ Map
 | `TileFlagHFlip`  | 2     | Horizontal flip |
 | `TileFlagOpaque` | 4     | Opaque tile     |
 | `TileFlagRotate` | 8     | 90° rotation    |
+
+#### Game-layer tile IDs
+
+The package exports constants for all DDNet game-layer tile types
+(e.g. `TileAir`, `TileSolid`, `TileDeath`, `TileUnhookable`, `TileFreeze`,
+`TileStart`, `TileFinish`, …) and two helper functions:
+
+| Function                    | Description                                                      |
+| --------------------------- | ---------------------------------------------------------------- |
+| `IsSolid(id uint8) bool`   | True if the tile blocks player movement (solid or unhookable).   |
+| `IsPassable(id uint8) bool` | True if a player can move through the tile (not solid/death/freeze). |
+
+#### Envelope curve types
+
+| Constant      | Value | Description           |
+| ------------- | ----- | --------------------- |
+| `CurveStep`   | 0     | Step interpolation    |
+| `CurveLinear` | 1     | Linear interpolation  |
+| `CurveSlow`   | 2     | Slow-in               |
+| `CurveFast`   | 3     | Fast-in               |
+| `CurveSmooth` | 4     | Smooth interpolation  |
+| `CurveBezier` | 5     | Bézier interpolation  |
 
 ### Sentinel errors
 
