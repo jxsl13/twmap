@@ -34,7 +34,7 @@ func (b MapBounds) Height() int { return b.MaxY - b.MinY }
 // Bounds computes the bounding box of all non-air tiles across renderable
 // layers (groups with parallax 100/100, excluding physics and detail layers).
 func (m *Map) Bounds() MapBounds {
-	steps := collectRenderSteps(m)
+	steps := collectRenderSteps(m, nil)
 	if len(steps) == 0 {
 		return MapBounds{}
 	}
@@ -53,7 +53,14 @@ type renderOptions struct {
 	maxWidth     int        // 0 = use native resolution
 	maxHeight    int        // 0 = use native resolution
 	region       *MapBounds // nil = full non-air bounding box
+	detail       bool       // include detail layers
+	viewport     *viewport  // nil = skip parallax groups
 	parseOptions []ParseOption
+}
+
+// viewport defines the camera center for parallax rendering, in game-pixel coordinates.
+type viewport struct {
+	centerX, centerY float64 // tile coordinates
 }
 
 // WithMaxSize sets the maximum output image dimensions. The rendered image
@@ -82,6 +89,37 @@ func WithRegion(region MapBounds) RenderOption {
 func WithParseOptions(opts ...ParseOption) RenderOption {
 	return func(o *renderOptions) {
 		o.parseOptions = append(o.parseOptions, opts...)
+	}
+}
+
+// WithDetail enables rendering of detail layers, which are normally
+// excluded. In the DDNet client these layers are only shown when the
+// "High Detail" setting is active.
+func WithDetail(detail bool) RenderOption {
+	return func(o *renderOptions) {
+		o.detail = detail
+	}
+}
+
+// WithCameraAt sets the camera center to the middle of the given tile
+// and enables rendering of groups with parallax other than 100/100.
+// This is a convenience wrapper around [WithCamera] that centers on the tile.
+//
+// Without a camera, only groups with parallax 100/100 are rendered.
+func WithCameraAt(tileX, tileY int) RenderOption {
+	return WithCamera(float64(tileX)+0.5, float64(tileY)+0.5)
+}
+
+// WithCamera sets the camera center (in tile coordinates) and enables
+// rendering of groups with parallax other than 100/100.  Each group's
+// effective offset is computed using the Teeworlds parallax formula:
+//
+//	effective = camera * (1 - parallax/100) + group_offset
+//
+// Without a camera, only groups with parallax 100/100 are rendered.
+func WithCamera(x, y float64) RenderOption {
+	return func(o *renderOptions) {
+		o.viewport = &viewport{centerX: x, centerY: y}
 	}
 }
 
@@ -179,7 +217,7 @@ func nativeTileLen(m *Map, layers []renderLayer) uint32 {
 // renderMap is the internal rendering pipeline shared by Render and RenderMap.
 func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 	// ── 1. Collect all renderable layers (tiles + quads) in order ────────
-	steps := collectRenderSteps(m)
+	steps := collectRenderSteps(m, ro)
 	if len(steps) == 0 {
 		return image.NewNRGBA(image.Rect(0, 0, 1, 1)), nil
 	}
@@ -226,27 +264,50 @@ func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 }
 
 // collectRenderSteps collects all renderable layers (tiles and quads) in
-// back-to-front order from groups with parallax 100/100.  Group offsets are
-// converted to tile units and propagated into render steps so that the crop
-// and rendering phases account for them.
-func collectRenderSteps(m *Map) []renderStep {
+// back-to-front order.  By default only groups with parallax 100/100 are
+// included and detail layers are skipped.  When a viewport is set, groups
+// with other parallax values are also included and their offsets are computed
+// using the Teeworlds parallax formula.  When detail is enabled, detail
+// layers are included.
+func collectRenderSteps(m *Map, ro *renderOptions) []renderStep {
 	var steps []renderStep
+	hasViewport := ro != nil && ro.viewport != nil
+	includeDetail := ro != nil && ro.detail
+
 	for i := range m.Groups {
 		g := &m.Groups[i]
 
-		if g.ParallaxX != 100 || g.ParallaxY != 100 || g.Clipping {
+		isParallax100 := g.ParallaxX == 100 && g.ParallaxY == 100
+		if !isParallax100 && !hasViewport {
 			continue
 		}
 
+		// Compute effective group offset in game-pixels.
+		// Teeworlds formula: effective = camera * (1 - parallax/100) + offset
+		// For parallax 100% this reduces to just the group offset.
+		var effPixelX, effPixelY float64
+		if hasViewport {
+			camX := ro.viewport.centerX * float64(pixelsPerTile)
+			camY := ro.viewport.centerY * float64(pixelsPerTile)
+			effPixelX = camX*(1.0-float64(g.ParallaxX)/100.0) + float64(g.OffsetX)
+			effPixelY = camY*(1.0-float64(g.ParallaxY)/100.0) + float64(g.OffsetY)
+		} else {
+			effPixelX = float64(g.OffsetX)
+			effPixelY = float64(g.OffsetY)
+		}
+
 		// Group offset in game-pixels → tile units.
-		tileOffX := int(g.OffsetX) / pixelsPerTile
-		tileOffY := int(g.OffsetY) / pixelsPerTile
-		quadOffX := float64(g.OffsetX) / float64(pixelsPerTile)
-		quadOffY := float64(g.OffsetY) / float64(pixelsPerTile)
+		tileOffX := int(effPixelX) / pixelsPerTile
+		tileOffY := int(effPixelY) / pixelsPerTile
+		quadOffX := effPixelX / float64(pixelsPerTile)
+		quadOffY := effPixelY / float64(pixelsPerTile)
 
 		for j := range g.Layers {
 			l := &g.Layers[j]
-			if l.IsPhysics() || l.Detail {
+			if l.IsPhysics() {
+				continue
+			}
+			if l.Detail && !includeDetail {
 				continue
 			}
 
