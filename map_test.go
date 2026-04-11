@@ -116,7 +116,7 @@ func TestDatafileRoundTrip(t *testing.T) {
 
 				// Find first difference
 				minLen := min(len(got), len(original))
-				for i := 0; i < minLen; i++ {
+				for i := range minLen {
 					if original[i] != got[i] {
 						t.Errorf("first difference at byte %d: original=0x%02x, got=0x%02x", i, original[i], got[i])
 						break

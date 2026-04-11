@@ -75,7 +75,7 @@ func main() {
     fmt.Println("Images:", len(m.Images))
 
     // Generate a 800×600 thumbnail.
-    thumb, err := twmap.RenderMap(m, 800, 600)
+    thumb, err := twmap.RenderMap(m, twmap.WithMaxSize(800, 600))
     if err != nil {
         log.Fatal(err)
     }
@@ -121,11 +121,16 @@ func main() {
 
 ### Rendering
 
-| Function                                                                      | Description                                  |
-| ----------------------------------------------------------------------------- | -------------------------------------------- |
-| `Render(r io.Reader, maxW, maxH int, opts ...ParseOption) (*image.NRGBA, error)` | Parse + render in one step.              |
-| `RenderMap(m *Map, maxW, maxH int) (*image.NRGBA, error)`                     | Render from an already-parsed `Map`.         |
-| `RegisterExternalImage(name string, img *image.NRGBA)`                        | Register a tileset for use during rendering. |
+| Function / Type                                                            | Description                                                                                           |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `Render(r io.Reader, opts ...RenderOption) (*image.NRGBA, error)`          | Parse + render in one step.                                                                           |
+| `RenderMap(m *Map, opts ...RenderOption) (*image.NRGBA, error)`            | Render from an already-parsed `Map`.                                                                  |
+| `(*Map).Bounds() MapBounds`                                                | Bounding box (in tile coords) of all non-air tiles across renderable layers.                          |
+| `MapBounds{MinX, MinY, MaxX, MaxY int}`                                    | Axis-aligned bounding box with `Width()` and `Height()` helpers.                                      |
+| `WithMaxSize(maxW, maxH int) RenderOption`                                 | Constrain output to maxW×maxH (default: native tileset resolution).                                   |
+| `WithRegion(region MapBounds) RenderOption`                                | Render only a sub-section of the map.                                                                 |
+| `WithParseOptions(opts ...ParseOption) RenderOption`                       | Pass parse options to `Render` (ignored by `RenderMap`).                                              |
+| `RegisterExternalImage(name string, img *image.NRGBA)`                     | Register a tileset for use during rendering.                                                          |
 
 To make the default DDNet/Teeworlds tilesets available, add a blank import:
 
@@ -143,8 +148,10 @@ the same way.
 - Only groups with parallax 100/100 and no clipping are rendered.
 - Physics layers (game, tele, speedup, front, switch, tune) and detail
   layers are excluded.
-- The output is cropped to the bounding box of non-air tiles and scaled
-  to fit within the requested dimensions while preserving aspect ratio.
+- The output is cropped to the bounding box of non-air tiles (or the region
+  specified via `WithRegion`) and, when `WithMaxSize` is used, scaled to fit
+  within the requested dimensions while preserving aspect ratio.
+  Without `WithMaxSize`, the output uses the native tileset resolution.
 - A checkerboard background is drawn behind all layers.
 - Tile flags (`VFlip`, `HFlip`, `Rotate`) are applied per-tile.
 - Quad layers are rasterized with barycentric vertex-color and texture

@@ -164,10 +164,7 @@ func nativeTileLen(m *Map, layers []renderLayer) uint32 {
 		}
 		seen[l.imageID] = true
 		img := m.Images[l.imageID]
-		side := img.Width
-		if img.Height > side {
-			side = img.Height
-		}
+		side := max(img.Height, img.Width)
 		if side > maxSide {
 			maxSide = side
 		}
@@ -175,10 +172,7 @@ func nativeTileLen(m *Map, layers []renderLayer) uint32 {
 	if maxSide <= 0 {
 		return 64
 	}
-	tl := uint32(maxSide) / tilesetGridSize
-	if tl < 1 {
-		tl = 1
-	}
+	tl := max(uint32(maxSide)/tilesetGridSize, 1)
 	return tl
 }
 

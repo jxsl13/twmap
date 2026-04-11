@@ -114,7 +114,7 @@ func ExampleRender() {
 	defer f.Close()
 
 	// Render a 800x600 thumbnail.
-	thumb, err := twmap.Render(f, 800, 600)
+	thumb, err := twmap.Render(f, twmap.WithMaxSize(800, 600))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func ExampleRenderMap() {
 	// Inspect the map before rendering.
 	fmt.Println("Author:", m.Info.Author)
 
-	thumb, err := twmap.RenderMap(m, 400, 300)
+	thumb, err := twmap.RenderMap(m, twmap.WithMaxSize(400, 300))
 	if err != nil {
 		log.Fatal(err)
 	}
