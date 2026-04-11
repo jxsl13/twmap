@@ -26,11 +26,17 @@ suitable for inspection, modification, writing, validation, or rendering.
 - **Render / RenderMap** — generate an `image.NRGBA` thumbnail with
   configurable bounding box, including tile flags (flip, rotate), layer
   colors, checkerboard background, and barycentric quad rasterization.
-- **External tilesets** — optional `external` sub-package ships embedded
-  PNGs for common DDNet/Teeworlds tilesets, registered automatically via
-  blank import (like `image/png` and `image/jpeg`).
-- **RegisterExternalImage** — public API for registering custom tilesets
-  from your own packages.
+- **External tilesets** — optional `external/mapres` sub-package ships
+  embedded PNGs for common DDNet/Teeworlds tilesets, registered
+  automatically via blank import (like `image/png` and `image/jpeg`).
+- **Game skin sprites** — optional `external/gameskin` sub-package embeds
+  the DDNet game.png sprite sheet for rendering pickups, flags, and spawns
+  with actual game sprites via `WithEntities(true)`. Override with your own
+  skin via `RegisterGameSkin`.
+- **Particle sprites** — optional `external/particles` sub-package embeds
+  the DDNet particles.png sprite sheet.
+- **RegisterExternalImage / RegisterGameSkin** — public APIs for
+  registering custom tilesets and game skins from your own packages.
 - **Game-layer tile IDs** — exported constants for all DDNet game-layer
   tile types (`TileAir`, `TileSolid`, `TileFreeze`, …) and helper
   functions (`IsSolid`, `IsPassable`).
@@ -131,23 +137,45 @@ func main() {
 | `WithRegion(region MapBounds) RenderOption`                                | Render only a sub-section of the map.                                                                 |
 | `WithParseOptions(opts ...ParseOption) RenderOption`                       | Pass parse options to `Render` (ignored by `RenderMap`).                                              |
 | `RegisterExternalImage(name string, img *image.NRGBA)`                     | Register a tileset for use during rendering.                                                          |
+| `WithEntities(entities bool) RenderOption`                                 | Render game-layer entities (pickups, flags) using game skin sprites at DDNet proportions.              |
+| `WithGameLayer(gameLayer bool) RenderOption`                               | Render game layer tiles as a semi-transparent overlay (shows solid, hookable, freeze, spawns, etc.).  |
+| `RegisterGameSkin(img *image.NRGBA)`                                       | Register a custom game skin image (1024×512, 32×16 grid) for entity rendering.                        |
+| `RegisterParticleImage(img *image.NRGBA)`                                  | Register a particle sprite sheet.                                                                     |
 
-To make the default DDNet/Teeworlds tilesets available, add a blank import:
+To make the default DDNet/Teeworlds assets available, add a blank import:
 
 ```go
-import _ "github.com/jxsl13/twmap/external"
+import _ "github.com/jxsl13/twmap/external" // registers mapres + gameskin + particles
 ```
 
-This follows the same pattern as `image/png` and `image/jpeg`: the
-sub-package's `init()` function registers all its tilesets with
-`twmap.RegisterExternalImage`. You can create your own tileset packages
-the same way.
+Or import only what you need:
+
+```go
+import _ "github.com/jxsl13/twmap/external/mapres"     // tileset images
+import _ "github.com/jxsl13/twmap/external/gameskin"   // game skin (pickups, flags, spawns)
+import _ "github.com/jxsl13/twmap/external/particles"  // particle sprites
+```
+
+This follows the same pattern as `image/png` and `image/jpeg`: each
+sub-package's `init()` function registers its assets with the
+corresponding `twmap.Register*` function. You can create your own
+asset packages the same way, or call `RegisterGameSkin` directly to
+override the default game skin with a custom one.
 
 **Rendering details:**
 
 - Only groups with parallax 100/100 and no clipping are rendered.
 - Physics layers (game, tele, speedup, front, switch, tune) and detail
-  layers are excluded.
+  layers are excluded (detail can be enabled with `WithDetail(true)`).
+- When `WithEntities(true)` is set and a game skin is registered, entity
+  sprites (hearts, shields, weapons, flags) are drawn from the game skin
+  at their DDNet client proportions (spanning multiple tiles). Without a
+  game skin, colored circles are used as fallback. Spawns are not rendered
+  as entity sprites — use `WithGameLayer(true)` to make them visible.
+- When `WithGameLayer(true)` is set, game layer tiles (solid, hookable,
+  freeze, spawns, checkpoints, etc.) are rendered as a semi-transparent
+  overlay using the entities tileset, matching the DDNet editor's entity
+  overlay / `cl_overlay_entities` display.
 - The output is cropped to the bounding box of non-air tiles (or the region
   specified via `WithRegion`) and, when `WithMaxSize` is used, scaled to fit
   within the requested dimensions while preserving aspect ratio.
@@ -273,7 +301,18 @@ make vet    # go vet ./...
 
 [MIT](LICENSE) — Copyright (c) 2026 John Behm
 
-Embedded tilesets in `external/mapres/` are subject to their own [license](external/mapres/LICENSE).
+### Embedded assets from DDNet
+
+The image assets bundled in the `external/` sub-packages originate from the
+[DDNet project](https://github.com/ddnet/ddnet) and are released under
+**CC-BY-SA 3.0** (https://creativecommons.org/licenses/by-sa/3.0/) as stated
+in DDNet's [license.txt](https://github.com/ddnet/ddnet/blob/master/license.txt).
+
+| Package | Image(s) | Source path in DDNet | License file |
+| ------- | -------- | -------------------- | ------------ |
+| `external/gameskin` | `game.png` — game skin sprite sheet (pickups, flags, spawns) | [`data/game.png`](https://github.com/ddnet/ddnet/blob/master/data/game.png) | [external/gameskin/LICENSE](external/gameskin/LICENSE) |
+| `external/mapres` | `*.png` — tileset images (grass, desert, jungle, winter, …) | [`data/mapres/`](https://github.com/ddnet/ddnet/tree/master/data/mapres) | [external/mapres/LICENSE](external/mapres/LICENSE) |
+| `external/particles` | `particles.png` — particle sprite sheet | [`data/particles.png`](https://github.com/ddnet/ddnet/blob/master/data/particles.png) | [external/particles/LICENSE](external/particles/LICENSE) |
 
 ## References
 

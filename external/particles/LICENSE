@@ -1,5 +1,5 @@
-The tileset images (*.png) are from the DDNet project
-(https://github.com/ddnet/ddnet) specifically from data/mapres/.
+The particle sprite image (particles.png) is from the DDNet project
+(https://github.com/ddnet/ddnet) specifically from data/particles.png.
 
 The following is the exact license text from DDNet's license.txt
 (https://github.com/ddnet/ddnet/blob/master/license.txt):

@@ -1,5 +1,5 @@
-The tileset images (*.png) are from the DDNet project
-(https://github.com/ddnet/ddnet) specifically from data/mapres/.
+The game skin sprite image (game.png) is from the DDNet project
+(https://github.com/ddnet/ddnet) specifically from data/game.png.
 
 The following is the exact license text from DDNet's license.txt
 (https://github.com/ddnet/ddnet/blob/master/license.txt):

@@ -54,6 +54,8 @@ type renderOptions struct {
 	maxHeight    int        // 0 = use native resolution
 	region       *MapBounds // nil = full non-air bounding box
 	detail       bool       // include detail layers
+	entities     bool       // render entity icons (pickups, flags, spawns)
+	gameLayer    bool       // render game layer tiles (entities overlay)
 	viewport     *viewport  // nil = skip parallax groups
 	parseOptions []ParseOption
 }
@@ -98,6 +100,39 @@ func WithParseOptions(opts ...ParseOption) RenderOption {
 func WithDetail(detail bool) RenderOption {
 	return func(o *renderOptions) {
 		o.detail = detail
+	}
+}
+
+// WithEntities enables rendering of game-layer entity icons (pickups,
+// flags, and spawn points). When a game skin is registered (via
+// [RegisterGameSkin] or by importing the gameskin package), the actual
+// sprite images from the skin are drawn. Without a game skin, colored
+// circles are used as a fallback.
+//
+// To use a custom game skin, call [RegisterGameSkin] with your own
+// 1024×512 image following the DDNet game.png layout.
+//
+// Default game skin:
+//
+//	import _ "github.com/jxsl13/twmap/external/gameskin"
+func WithEntities(entities bool) RenderOption {
+	return func(o *renderOptions) {
+		o.entities = entities
+	}
+}
+
+// WithGameLayer enables rendering of game layer tiles as a semi-transparent
+// entity overlay. This makes invisible tiles (solid, hookable, freeze,
+// spawns, checkpoints, etc.) visible, matching the DDNet editor's entity
+// overlay / cl_overlay_entities display.
+//
+// Requires the entities tileset to be registered, which is done by
+// importing the external/mapres package (included in external):
+//
+//	import _ "github.com/jxsl13/twmap/external/mapres"
+func WithGameLayer(gameLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.gameLayer = gameLayer
 	}
 }
 
@@ -255,6 +290,16 @@ func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 	fillCheckerboard(canvas, tileLen)
 	renderAllSteps(canvas, steps, tilesets, quadImages, &crop, tileLen)
 
+	// ── 5b. Render entity icons (pickups, flags, spawns) ─────────────────
+	if ro.entities {
+		renderEntities(canvas, m, &crop, tileLen)
+	}
+
+	// ── 5c. Render game layer overlay (entities.png) ─────────────────────
+	if ro.gameLayer {
+		renderGameLayer(canvas, m, &crop, tileLen)
+	}
+
 	// ── 6. Scale to output bounding box (only when max size is set) ──────
 	if useMaxSize {
 		outW, outH := fitInBoundingBox(cropW, cropH, ro.maxWidth, ro.maxHeight)
@@ -283,17 +328,20 @@ func collectRenderSteps(m *Map, ro *renderOptions) []renderStep {
 		}
 
 		// Compute effective group offset in game-pixels.
-		// Teeworlds formula: effective = camera * (1 - parallax/100) + offset
-		// For parallax 100% this reduces to just the group offset.
+		// DDNet world mapping uses screen points based on:
+		//   p0 = offset + center*parallax/100 - width/2
+		// Rewriting into a common 100/100 world plane for compositing gives:
+		//   effective = camera*(1-parallax/100) - offset
+		// For parallax 100% this reduces to -offset.
 		var effPixelX, effPixelY float64
 		if hasViewport {
 			camX := ro.viewport.centerX * float64(pixelsPerTile)
 			camY := ro.viewport.centerY * float64(pixelsPerTile)
-			effPixelX = camX*(1.0-float64(g.ParallaxX)/100.0) + float64(g.OffsetX)
-			effPixelY = camY*(1.0-float64(g.ParallaxY)/100.0) + float64(g.OffsetY)
+			effPixelX = camX*(1.0-float64(g.ParallaxX)/100.0) - float64(g.OffsetX)
+			effPixelY = camY*(1.0-float64(g.ParallaxY)/100.0) - float64(g.OffsetY)
 		} else {
-			effPixelX = float64(g.OffsetX)
-			effPixelY = float64(g.OffsetY)
+			effPixelX = -float64(g.OffsetX)
+			effPixelY = -float64(g.OffsetY)
 		}
 
 		// Group offset in game-pixels → tile units.
@@ -485,16 +533,7 @@ func prepareTilesets(m *Map, layers []renderLayer, tileLen uint32) map[int]*imag
 
 	for imgID := range needed {
 		if imgID < 0 || imgID >= len(m.Images) {
-			// No image: use solid white tileset
-			white := image.NewNRGBA(image.Rect(0, 0, resultSide, resultSide))
-			for i := 0; i < len(white.Pix); i += 4 {
-				white.Pix[i] = 255
-				white.Pix[i+1] = 255
-				white.Pix[i+2] = 255
-				white.Pix[i+3] = 255
-			}
-			clearAirTile(white, tileLen)
-			tilesets[imgID] = white
+			tilesets[imgID] = newWhiteTileset(resultSide, tileLen)
 			continue
 		}
 
@@ -508,16 +547,7 @@ func prepareTilesets(m *Map, layers []renderLayer, tileLen uint32) map[int]*imag
 			}
 		}
 		if srcRGBA == nil || src.Width == 0 || src.Height == 0 {
-			// Image not available: solid white
-			white := image.NewNRGBA(image.Rect(0, 0, resultSide, resultSide))
-			for i := 0; i < len(white.Pix); i += 4 {
-				white.Pix[i] = 255
-				white.Pix[i+1] = 255
-				white.Pix[i+2] = 255
-				white.Pix[i+3] = 255
-			}
-			clearAirTile(white, tileLen)
-			tilesets[imgID] = white
+			tilesets[imgID] = newWhiteTileset(resultSide, tileLen)
 			continue
 		}
 
@@ -546,6 +576,20 @@ func clearAirTile(img *image.NRGBA, tileLen uint32) {
 			img.Pix[p+3] = 0
 		}
 	}
+}
+
+// newWhiteTileset creates a solid white tileset image of side×side pixels
+// with the air tile (index 0) cleared.
+func newWhiteTileset(side int, tileLen uint32) *image.NRGBA {
+	white := image.NewNRGBA(image.Rect(0, 0, side, side))
+	for i := 0; i < len(white.Pix); i += 4 {
+		white.Pix[i] = 255
+		white.Pix[i+1] = 255
+		white.Pix[i+2] = 255
+		white.Pix[i+3] = 255
+	}
+	clearAirTile(white, tileLen)
+	return white
 }
 
 // prepareQuadImages returns full-resolution images for use by quad layers.
@@ -717,25 +761,15 @@ func renderSingleTileLayer(
 
 			// Slow path: flags or color modulation required
 			flags := tile.Flags
-			rotate := flags&TileFlagRotate != 0
-			vflip := flags&TileFlagVFlip != 0
-			hflip := flags&TileFlagHFlip != 0
+			// Match DDNet's texture-coordinate table layout exactly:
+			// tableFlag = (X/Y flip bits) + (rotate bit shifted down)
+			tableFlag := (flags & (TileFlagVFlip | TileFlagHFlip)) + ((flags & TileFlagRotate) >> 1)
 			last := tileLen - 1
 
 			for iy := range tl {
 				dstRowOff := (baseDstY + iy) * canvasStride
 				for ix := range tl {
-					ty := uint32(iy)
-					tx := uint32(ix)
-					if rotate {
-						ty, tx = last-tx, ty
-					}
-					if vflip {
-						tx = last - tx
-					}
-					if hflip {
-						ty = last - ty
-					}
+					tx, ty := transformTileCoord(tableFlag, uint32(ix), uint32(iy), last)
 
 					srcOff := (baseSrcY+int(ty))*tsStride + (baseSrcX+int(tx))*4
 					if srcOff < 0 || srcOff+3 >= tsPixLen {
@@ -778,6 +812,32 @@ func renderSingleTileLayer(
 	}
 }
 
+// transformTileCoord maps destination tile pixel coordinates (x,y) to source
+// tile pixel coordinates according to DDNet's 8-way flip/rotate table:
+// tableFlag = (flags&(flip bits)) + ((flags&rotate)>>1)
+func transformTileCoord(tableFlag uint8, x, y, last uint32) (tx, ty uint32) {
+	switch tableFlag {
+	case 0: // identity
+		return x, y
+	case 1: // flip X coord
+		return last - x, y
+	case 2: // flip Y coord
+		return x, last - y
+	case 3: // flip X+Y
+		return last - x, last - y
+	case 4: // rotate 90
+		return y, last - x
+	case 5: // rotate 90 + flip X
+		return last - y, last - x
+	case 6: // rotate 90 + flip Y
+		return y, x
+	case 7: // rotate 90 + flip X+Y
+		return last - y, x
+	default:
+		return x, y
+	}
+}
+
 // renderSingleQuadLayer composites one quad layer onto canvas.
 func renderSingleQuadLayer(
 	canvas *image.NRGBA,
@@ -793,10 +853,11 @@ func renderSingleQuadLayer(
 }
 
 // renderQuadOnCanvas rasterizes a single quad as two triangles.
-// Quad vertex layout (DDNet convention):
+// Quad vertex layout in map data is remapped like DDNet does:
+// indices 2 and 3 are swapped before rendering.
 //
 //	[0]=TL  [1]=TR
-//	[2]=BL  [3]=BR
+//	[2]=BR  [3]=BL (after remap)
 //
 // Triangulation: (0,1,2) and (0,2,3), matching OpenGL GL_QUADS.
 func renderQuadOnCanvas(
@@ -810,33 +871,41 @@ func renderQuadOnCanvas(
 	tl := float64(tileLen)
 	cropMinX := float64(crop.MinX)
 	cropMinY := float64(crop.MinY)
+	quadIdx := [4]int{0, 1, 3, 2} // DDNet swaps 2<->3 before rendering quads
 
 	// Convert quad corner positions from tile coords to canvas pixel coords,
 	// applying the group offset.
 	var px, py [4]float64
 	for i := range 4 {
-		px[i] = (q.Points[i].X + offsetX - cropMinX) * tl
-		py[i] = (q.Points[i].Y + offsetY - cropMinY) * tl
+		idx := quadIdx[i]
+		px[i] = (q.Points[idx].X + offsetX - cropMinX) * tl
+		py[i] = (q.Points[idx].Y + offsetY - cropMinY) * tl
 	}
 
 	// Texture coords (normalized [0,1])
 	var u, v [4]float64
 	for i := range 4 {
-		u[i] = q.TexCoords[i].X
-		v[i] = q.TexCoords[i].Y
+		idx := quadIdx[i]
+		u[i] = q.TexCoords[idx].X
+		v[i] = q.TexCoords[idx].Y
+	}
+
+	var c [4]color.NRGBA
+	for i := range 4 {
+		c[i] = q.Colors[quadIdx[i]]
 	}
 
 	// Triangle 1: vertices 0, 1, 2
 	rasterizeTriangle(canvas, tex,
-		px[0], py[0], u[0], v[0], q.Colors[0],
-		px[1], py[1], u[1], v[1], q.Colors[1],
-		px[2], py[2], u[2], v[2], q.Colors[2],
+		px[0], py[0], u[0], v[0], c[0],
+		px[1], py[1], u[1], v[1], c[1],
+		px[2], py[2], u[2], v[2], c[2],
 	)
 	// Triangle 2: vertices 0, 2, 3
 	rasterizeTriangle(canvas, tex,
-		px[0], py[0], u[0], v[0], q.Colors[0],
-		px[2], py[2], u[2], v[2], q.Colors[2],
-		px[3], py[3], u[3], v[3], q.Colors[3],
+		px[0], py[0], u[0], v[0], c[0],
+		px[2], py[2], u[2], v[2], c[2],
+		px[3], py[3], u[3], v[3], c[3],
 	)
 }
 
@@ -1018,8 +1087,9 @@ func fitInBoundingBox(srcW, srcH, maxW, maxH int) (int, int) {
 	return w, h
 }
 
-// scaleNRGBA performs bilinear interpolation on RGB channels only (alpha is
-// always 255 on our opaque canvas), avoiding per-pixel interface dispatch.
+// scaleNRGBA performs bilinear interpolation to resize an NRGBA image.
+// It interpolates all four channels (RGBA) in premultiplied-alpha space
+// to produce smooth, correct edges on transparent images.
 func scaleNRGBA(src *image.NRGBA, dstW, dstH int) *image.NRGBA {
 	dst := image.NewNRGBA(image.Rect(0, 0, dstW, dstH))
 	srcW := src.Bounds().Dx()
@@ -1071,19 +1141,43 @@ func scaleNRGBA(src *image.NRGBA, dstW, dstH int) *image.NRGBA {
 			off01 := srcRow1 + sx0*4
 			off11 := srcRow1 + sx1*4
 
-			// Bilinear interpolation for RGB only (alpha stays 255)
-			r := (uint32(srcPix[off00])*fx0*fy0 + uint32(srcPix[off10])*fx1*fy0 +
-				uint32(srcPix[off01])*fx0*fy1 + uint32(srcPix[off11])*fx1*fy1 + 32768) >> 16
-			g := (uint32(srcPix[off00+1])*fx0*fy0 + uint32(srcPix[off10+1])*fx1*fy0 +
-				uint32(srcPix[off01+1])*fx0*fy1 + uint32(srcPix[off11+1])*fx1*fy1 + 32768) >> 16
-			b := (uint32(srcPix[off00+2])*fx0*fy0 + uint32(srcPix[off10+2])*fx1*fy0 +
-				uint32(srcPix[off01+2])*fx0*fy1 + uint32(srcPix[off11+2])*fx1*fy1 + 32768) >> 16
+			// Interpolate alpha.
+			a := (uint32(srcPix[off00+3])*fx0*fy0 + uint32(srcPix[off10+3])*fx1*fy0 +
+				uint32(srcPix[off01+3])*fx0*fy1 + uint32(srcPix[off11+3])*fx1*fy1 + 32768) >> 16
+
+			if a == 0 {
+				dOff := dstRow + dx*4
+				dstPix[dOff] = 0
+				dstPix[dOff+1] = 0
+				dstPix[dOff+2] = 0
+				dstPix[dOff+3] = 0
+				continue
+			}
+
+			// Interpolate RGB in premultiplied-alpha space for correct
+			// blending at transparency boundaries.
+			a00 := uint32(srcPix[off00+3])
+			a10 := uint32(srcPix[off10+3])
+			a01 := uint32(srcPix[off01+3])
+			a11 := uint32(srcPix[off11+3])
+
+			pa := a00*fx0*fy0 + a10*fx1*fy0 + a01*fx0*fy1 + a11*fx1*fy1
+			if pa == 0 {
+				pa = 1
+			}
+
+			pr := uint32(srcPix[off00])*a00*fx0*fy0 + uint32(srcPix[off10])*a10*fx1*fy0 +
+				uint32(srcPix[off01])*a01*fx0*fy1 + uint32(srcPix[off11])*a11*fx1*fy1
+			pg := uint32(srcPix[off00+1])*a00*fx0*fy0 + uint32(srcPix[off10+1])*a10*fx1*fy0 +
+				uint32(srcPix[off01+1])*a01*fx0*fy1 + uint32(srcPix[off11+1])*a11*fx1*fy1
+			pb := uint32(srcPix[off00+2])*a00*fx0*fy0 + uint32(srcPix[off10+2])*a10*fx1*fy0 +
+				uint32(srcPix[off01+2])*a01*fx0*fy1 + uint32(srcPix[off11+2])*a11*fx1*fy1
 
 			dOff := dstRow + dx*4
-			dstPix[dOff] = uint8(r)
-			dstPix[dOff+1] = uint8(g)
-			dstPix[dOff+2] = uint8(b)
-			dstPix[dOff+3] = 255
+			dstPix[dOff] = uint8((pr + pa/2) / pa)
+			dstPix[dOff+1] = uint8((pg + pa/2) / pa)
+			dstPix[dOff+2] = uint8((pb + pa/2) / pa)
+			dstPix[dOff+3] = uint8(a)
 		}
 	}
 	return dst
@@ -1121,4 +1215,421 @@ func fillCheckerboard(canvas *image.NRGBA, tileLen uint32) {
 			pix[off+3] = 255
 		}
 	}
+}
+
+// ── Entity rendering ─────────────────────────────────────────────────────────
+
+// gameSkinSprite defines a sub-rectangle in the game.png sprite sheet.
+// Coordinates are in grid cells (32×32 px each in a 1024×512 image).
+type gameSkinSprite struct {
+	x, y, w, h int
+}
+
+// bounds returns the pixel rectangle for this sprite.
+func (s gameSkinSprite) bounds() image.Rectangle {
+	const cell = 32
+	return image.Rect(s.x*cell, s.y*cell, (s.x+s.w)*cell, (s.y+s.h)*cell)
+}
+
+// entityRenderInfo defines the sprite region and display size of an entity.
+// widthTiles and heightTiles are the physical size in tile units, computed
+// from the DDNet client's GetSpriteScale formula and the weapon's visual_size.
+//
+// DDNet formula (items.cpp + graphics_threaded.cpp):
+//
+//	f = sqrt(spriteW² + spriteH²)
+//	scaleX, scaleY = spriteW/f, spriteH/f
+//	displaySize = baseSize * scale
+//	displayTiles = displaySize / 32.0  (32 game units per tile)
+//
+// Sources:
+//   - ddnet/src/game/client/components/items.cpp (OnInit, RenderPickup, RenderFlag)
+//   - ddnet/src/engine/client/graphics_threaded.cpp (GetSpriteScale)
+//   - ddnet/datasrc/content.py (weapon visual_size, sprite grid coords)
+type entityRenderInfo struct {
+	sprite       gameSkinSprite
+	widthTiles   float64 // display width in tile units
+	heightTiles  float64 // display height in tile units
+	offsetYTiles float64 // vertical offset (negative = up); used for flags
+}
+
+// entityInfo maps game-layer tile IDs to their sprite and DDNet display size.
+// Spawns have no entity sprite in DDNet — they are only visible in the
+// game layer overlay (entities.png).
+var entityInfo = map[uint8]entityRenderInfo{
+	// Health: sprite 2×2, base_size=64. f=√8≈2.828, scale=0.707 → 45.25 GU → 1.414 tiles
+	TileHealth: {
+		sprite:     gameSkinSprite{x: 10, y: 2, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
+	// Armor: same as health
+	TileArmor: {
+		sprite:     gameSkinSprite{x: 12, y: 2, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
+	// Shotgun: sprite 8×2, visual_size=96. f=√68≈8.246 → 93.1×23.3 GU → 2.91×0.73 tiles
+	TileWeaponShotgun: {
+		sprite:     gameSkinSprite{x: 2, y: 6, w: 8, h: 2},
+		widthTiles: 2.91, heightTiles: 0.73,
+	},
+	// Grenade: sprite 7×2, visual_size=96. f=√53≈7.280 → 92.3×26.4 GU → 2.88×0.82 tiles
+	TileWeaponGrenade: {
+		sprite:     gameSkinSprite{x: 2, y: 8, w: 7, h: 2},
+		widthTiles: 2.88, heightTiles: 0.82,
+	},
+	// Ninja: sprite 8×2, base_size=128. f=√68≈8.246 → 124.2×31.0 GU → 3.88×0.97 tiles
+	TilePowerupNinja: {
+		sprite:     gameSkinSprite{x: 2, y: 10, w: 8, h: 2},
+		widthTiles: 3.88, heightTiles: 0.97,
+	},
+	// Laser: sprite 7×3, visual_size=92. f=√58≈7.616 → 84.6×36.2 GU → 2.64×1.13 tiles
+	TileWeaponLaser: {
+		sprite:     gameSkinSprite{x: 2, y: 12, w: 7, h: 3},
+		widthTiles: 2.64, heightTiles: 1.13,
+	},
+	// Flag blue: hardcoded 42×84 GU → 1.31×2.63 tiles, drawn at y - 42*0.75 = -0.98 tiles
+	TileFlagstandBlue: {
+		sprite:     gameSkinSprite{x: 12, y: 8, w: 4, h: 8},
+		widthTiles: 1.31, heightTiles: 2.63,
+		offsetYTiles: -0.98,
+	},
+	// Flag red: same dimensions
+	TileFlagstandRed: {
+		sprite:     gameSkinSprite{x: 16, y: 8, w: 4, h: 8},
+		widthTiles: 1.31, heightTiles: 2.63,
+		offsetYTiles: -0.98,
+	},
+}
+
+// entityFallbackStyle defines colors for the circle fallback when no game
+// skin is registered.
+type entityFallbackStyle struct {
+	fill    color.NRGBA
+	outline color.NRGBA
+}
+
+var entityFallback = map[uint8]entityFallbackStyle{
+	TileFlagstandRed:  {fill: color.NRGBA{R: 255, G: 40, B: 40, A: 220}, outline: color.NRGBA{R: 180, G: 0, B: 0, A: 255}},
+	TileFlagstandBlue: {fill: color.NRGBA{R: 40, G: 40, B: 255, A: 220}, outline: color.NRGBA{R: 0, G: 0, B: 180, A: 255}},
+	TileHealth:        {fill: color.NRGBA{R: 255, G: 50, B: 50, A: 220}, outline: color.NRGBA{R: 200, G: 0, B: 0, A: 255}},
+	TileArmor:         {fill: color.NRGBA{R: 60, G: 200, B: 60, A: 220}, outline: color.NRGBA{R: 0, G: 150, B: 0, A: 255}},
+	TileWeaponShotgun: {fill: color.NRGBA{R: 200, G: 150, B: 50, A: 220}, outline: color.NRGBA{R: 160, G: 110, B: 0, A: 255}},
+	TileWeaponGrenade: {fill: color.NRGBA{R: 80, G: 180, B: 80, A: 220}, outline: color.NRGBA{R: 40, G: 140, B: 40, A: 255}},
+	TilePowerupNinja:  {fill: color.NRGBA{R: 160, G: 80, B: 200, A: 220}, outline: color.NRGBA{R: 120, G: 40, B: 160, A: 255}},
+	TileWeaponLaser:   {fill: color.NRGBA{R: 50, G: 180, B: 220, A: 220}, outline: color.NRGBA{R: 0, G: 140, B: 180, A: 255}},
+}
+
+// renderEntities draws entity icons (pickups, flags) from the game layer
+// onto the canvas. When a game skin is registered (via [RegisterGameSkin]
+// or importing the gameskin package), sprites from the skin are drawn at
+// their DDNet client proportions. Otherwise, colored circles are used.
+//
+// Spawns are intentionally excluded — they have no runtime sprite in DDNet
+// and are only visible through the game layer overlay ([WithGameLayer]).
+func renderEntities(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32) {
+	skin := resolveGameSkin()
+	tl := int(tileLen)
+	for _, g := range m.Groups {
+		for _, l := range g.Layers {
+			if l.Kind != LayerKindGame {
+				continue
+			}
+			for i, t := range l.Tiles {
+				info, hasSprite := entityInfo[t.ID]
+				fallback, hasFallback := entityFallback[t.ID]
+				if !hasSprite && !hasFallback {
+					continue
+				}
+
+				tx := i % l.Width
+				ty := i / l.Width
+				// Center of the entity tile in canvas pixels.
+				centerX := float64(tx-crop.MinX)*float64(tl) + float64(tl)/2.0
+				centerY := float64(ty-crop.MinY)*float64(tl) + float64(tl)/2.0
+
+				if skin != nil && hasSprite {
+					dstW := info.widthTiles * float64(tl)
+					dstH := info.heightTiles * float64(tl)
+					offY := info.offsetYTiles * float64(tl)
+					blitSpriteRect(canvas, skin, info.sprite.bounds(),
+						centerX-dstW/2, centerY-dstH/2+offY, dstW, dstH)
+				} else if hasFallback {
+					cx := (tx - crop.MinX) * tl
+					cy := (ty - crop.MinY) * tl
+					drawEntityCircle(canvas, cx, cy, tl, fallback)
+				}
+			}
+		}
+	}
+}
+
+// blitSpriteRect draws the srcRect region of src onto canvas at the given
+// destination rectangle (dstX, dstY, dstW, dstH) in canvas pixel coordinates.
+// Uses bilinear interpolation for smooth edges.
+func blitSpriteRect(canvas *image.NRGBA, src *image.NRGBA, srcRect image.Rectangle,
+	dstX, dstY, dstW, dstH float64) {
+
+	sw := float64(srcRect.Dx())
+	sh := float64(srcRect.Dy())
+	if sw == 0 || sh == 0 || dstW <= 0 || dstH <= 0 {
+		return
+	}
+
+	bounds := canvas.Bounds()
+	startDX := int(math.Floor(dstX))
+	startDY := int(math.Floor(dstY))
+	endDX := int(math.Ceil(dstX + dstW))
+	endDY := int(math.Ceil(dstY + dstH))
+
+	// Clip to canvas.
+	if startDX < bounds.Min.X {
+		startDX = bounds.Min.X
+	}
+	if startDY < bounds.Min.Y {
+		startDY = bounds.Min.Y
+	}
+	if endDX > bounds.Max.X {
+		endDX = bounds.Max.X
+	}
+	if endDY > bounds.Max.Y {
+		endDY = bounds.Max.Y
+	}
+
+	srcPix := src.Pix
+	srcStride := src.Stride
+	maxSX := srcRect.Max.X - 1
+	maxSY := srcRect.Max.Y - 1
+
+	for py := startDY; py < endDY; py++ {
+		fy := (float64(py)+0.5-dstY)/dstH*sh - 0.5 + float64(srcRect.Min.Y)
+		for px := startDX; px < endDX; px++ {
+			fx := (float64(px)+0.5-dstX)/dstW*sw - 0.5 + float64(srcRect.Min.X)
+
+			// Bilinear sample coordinates.
+			x0 := int(math.Floor(fx))
+			y0 := int(math.Floor(fy))
+			x1 := x0 + 1
+			y1 := y0 + 1
+			xf := fx - float64(x0)
+			yf := fy - float64(y0)
+
+			// Clamp to srcRect bounds.
+			if x0 < srcRect.Min.X {
+				x0 = srcRect.Min.X
+			}
+			if x0 > maxSX {
+				x0 = maxSX
+			}
+			if x1 < srcRect.Min.X {
+				x1 = srcRect.Min.X
+			}
+			if x1 > maxSX {
+				x1 = maxSX
+			}
+			if y0 < srcRect.Min.Y {
+				y0 = srcRect.Min.Y
+			}
+			if y0 > maxSY {
+				y0 = maxSY
+			}
+			if y1 < srcRect.Min.Y {
+				y1 = srcRect.Min.Y
+			}
+			if y1 > maxSY {
+				y1 = maxSY
+			}
+
+			// Four texel corners.
+			off00 := y0*srcStride + x0*4
+			off10 := y0*srcStride + x1*4
+			off01 := y1*srcStride + x0*4
+			off11 := y1*srcStride + x1*4
+
+			// Interpolate in premultiplied-alpha space for correct blending.
+			a00, a10 := float64(srcPix[off00+3]), float64(srcPix[off10+3])
+			a01, a11 := float64(srcPix[off01+3]), float64(srcPix[off11+3])
+			pa00, pa10 := a00/255.0, a10/255.0
+			pa01, pa11 := a01/255.0, a11/255.0
+
+			ix0 := 1 - xf
+			ix1 := xf
+			iy0 := 1 - yf
+			iy1 := yf
+
+			outA := a00*ix0*iy0 + a10*ix1*iy0 + a01*ix0*iy1 + a11*ix1*iy1
+			if outA < 0.5 {
+				continue
+			}
+
+			pr := float64(srcPix[off00+0])*pa00*ix0*iy0 + float64(srcPix[off10+0])*pa10*ix1*iy0 +
+				float64(srcPix[off01+0])*pa01*ix0*iy1 + float64(srcPix[off11+0])*pa11*ix1*iy1
+			pg := float64(srcPix[off00+1])*pa00*ix0*iy0 + float64(srcPix[off10+1])*pa10*ix1*iy0 +
+				float64(srcPix[off01+1])*pa01*ix0*iy1 + float64(srcPix[off11+1])*pa11*ix1*iy1
+			pb := float64(srcPix[off00+2])*pa00*ix0*iy0 + float64(srcPix[off10+2])*pa10*ix1*iy0 +
+				float64(srcPix[off01+2])*pa01*ix0*iy1 + float64(srcPix[off11+2])*pa11*ix1*iy1
+
+			// Convert back to non-premultiplied.
+			aOut := outA / 255.0
+			var r, g, b float64
+			if aOut > 0 {
+				r = pr / aOut
+				g = pg / aOut
+				b = pb / aOut
+			}
+
+			c := color.NRGBA{
+				R: uint8(clampF64(r)),
+				G: uint8(clampF64(g)),
+				B: uint8(clampF64(b)),
+				A: uint8(clampF64(outA)),
+			}
+			alphaBlendPixel(canvas, px, py, c)
+		}
+	}
+}
+
+// drawEntityCircle draws a filled circle with outline centered in the tile
+// at canvas pixel (cx, cy) with tile side length tl.
+func drawEntityCircle(canvas *image.NRGBA, cx, cy, tl int, style entityFallbackStyle) {
+	bounds := canvas.Bounds()
+	centerX := float64(cx) + float64(tl)/2.0
+	centerY := float64(cy) + float64(tl)/2.0
+	outerR := float64(tl) * 0.38
+	innerR := float64(tl) * 0.30
+
+	minPx := max(cx, bounds.Min.X)
+	minPy := max(cy, bounds.Min.Y)
+	maxPx := min(cx+tl, bounds.Max.X)
+	maxPy := min(cy+tl, bounds.Max.Y)
+
+	for py := minPy; py < maxPy; py++ {
+		dy := float64(py) + 0.5 - centerY
+		for px := minPx; px < maxPx; px++ {
+			dx := float64(px) + 0.5 - centerX
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist > outerR {
+				continue
+			}
+			var c color.NRGBA
+			if dist <= innerR {
+				c = style.fill
+			} else {
+				c = style.outline
+			}
+			alphaBlendPixel(canvas, px, py, c)
+		}
+	}
+}
+
+// ── Game layer overlay ───────────────────────────────────────────────────────
+
+// renderGameLayer renders the game layer tiles using the "entities" tileset
+// image, making invisible tiles (solid, hookable, freeze, spawns, etc.)
+// visible as a semi-transparent overlay. This matches the DDNet editor's
+// entity overlay / cl_overlay_entities behaviour.
+func renderGameLayer(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32) {
+	entImg := resolveExternalImage("entities")
+	if entImg == nil {
+		return
+	}
+
+	tl := int(tileLen)
+	// The entities.png is a 16×16 tileset grid.
+	scaledEnt := scaleTileset(entImg, tl)
+
+	for _, g := range m.Groups {
+		for _, l := range g.Layers {
+			if l.Kind != LayerKindGame {
+				continue
+			}
+			for i, t := range l.Tiles {
+				if t.ID == TileAir {
+					continue
+				}
+				tx := i % l.Width
+				ty := i / l.Width
+				cx := (tx - crop.MinX) * tl
+				cy := (ty - crop.MinY) * tl
+
+				// Tile index in 16×16 grid.
+				tileX := int(t.ID) % tilesetGridSize
+				tileY := int(t.ID) / tilesetGridSize
+				srcX := tileX * tl
+				srcY := tileY * tl
+
+				srcRect := image.Rect(srcX, srcY, srcX+tl, srcY+tl)
+				blitTileAlpha(canvas, scaledEnt, srcRect, cx, cy, tl, 180)
+			}
+		}
+	}
+}
+
+// scaleTileset scales a 16×16 tileset image so each tile is tl×tl pixels.
+func scaleTileset(img *image.NRGBA, tl int) *image.NRGBA {
+	targetW := tilesetGridSize * tl
+	targetH := tilesetGridSize * tl
+	if img.Bounds().Dx() == targetW && img.Bounds().Dy() == targetH {
+		return img
+	}
+	return scaleNRGBA(img, targetW, targetH)
+}
+
+// blitTileAlpha copies pixels from srcRect of src to (cx, cy) on canvas,
+// applying a fixed alpha ceiling to keep the overlay semi-transparent.
+func blitTileAlpha(canvas *image.NRGBA, src *image.NRGBA, srcRect image.Rectangle,
+	cx, cy, tl int, alpha uint8) {
+
+	bounds := canvas.Bounds()
+	for dy := 0; dy < tl; dy++ {
+		py := cy + dy
+		if py < bounds.Min.Y || py >= bounds.Max.Y {
+			continue
+		}
+		srcY := srcRect.Min.Y + dy
+		if srcY >= srcRect.Max.Y {
+			continue
+		}
+		for dx := 0; dx < tl; dx++ {
+			px := cx + dx
+			if px < bounds.Min.X || px >= bounds.Max.X {
+				continue
+			}
+			srcX := srcRect.Min.X + dx
+			if srcX >= srcRect.Max.X {
+				continue
+			}
+			sOff := src.PixOffset(srcX, srcY)
+			sa := src.Pix[sOff+3]
+			if sa == 0 {
+				continue
+			}
+			if sa > alpha {
+				sa = alpha
+			}
+			c := color.NRGBA{
+				R: src.Pix[sOff],
+				G: src.Pix[sOff+1],
+				B: src.Pix[sOff+2],
+				A: sa,
+			}
+			alphaBlendPixel(canvas, px, py, c)
+		}
+	}
+}
+
+// alphaBlendPixel composites color c over the existing pixel at (x, y)
+// using source-over alpha blending in non-premultiplied space.
+func alphaBlendPixel(canvas *image.NRGBA, x, y int, c color.NRGBA) {
+	off := canvas.PixOffset(x, y)
+	pix := canvas.Pix
+	sa := uint32(c.A)
+	da := uint32(pix[off+3])
+	outA := sa + da*(255-sa)/255
+	if outA == 0 {
+		return
+	}
+	pix[off+0] = uint8((uint32(c.R)*sa + uint32(pix[off+0])*da*(255-sa)/255) / outA)
+	pix[off+1] = uint8((uint32(c.G)*sa + uint32(pix[off+1])*da*(255-sa)/255) / outA)
+	pix[off+2] = uint8((uint32(c.B)*sa + uint32(pix[off+2])*da*(255-sa)/255) / outA)
+	pix[off+3] = uint8(outA)
 }
