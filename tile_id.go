@@ -76,6 +76,20 @@ const (
 	TileLiveFreeze   uint8 = 144
 	TileLiveUnfreeze uint8 = 145
 
+	// Entity tiles in the game layer (tile ID = 192 + entity index).
+	TileEntityOffset  uint8 = 192
+	TileSpawn         uint8 = 192 // generic (DM) spawn
+	TileSpawnRed      uint8 = 193 // red team spawn
+	TileSpawnBlue     uint8 = 194 // blue team spawn
+	TileFlagstandRed  uint8 = 195
+	TileFlagstandBlue uint8 = 196
+	TileArmor         uint8 = 197
+	TileHealth        uint8 = 198
+	TileWeaponShotgun uint8 = 199
+	TileWeaponGrenade uint8 = 200
+	TilePowerupNinja  uint8 = 201
+	TileWeaponLaser   uint8 = 202
+
 	// TileSize is the side length of a tile in world coordinate units.
 	TileSize = 32
 )
@@ -89,4 +103,10 @@ func IsSolid(id uint8) bool {
 // (not solid, not death, not freeze).
 func IsPassable(id uint8) bool {
 	return !IsSolid(id) && id != TileDeath && id != TileFreeze && id != TileDeepFreeze && id != TileLiveFreeze
+}
+
+// IsSpawn reports whether the tile ID is any kind of spawn point
+// (generic, red, or blue).
+func IsSpawn(id uint8) bool {
+	return id == TileSpawn || id == TileSpawnRed || id == TileSpawnBlue
 }

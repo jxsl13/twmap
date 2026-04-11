@@ -286,6 +286,56 @@ func (l *Layer) IsPhysics() bool {
 	return false
 }
 
+// SpawnType classifies a spawn point.
+type SpawnType uint8
+
+const (
+	SpawnGeneric SpawnType = iota // DM / generic spawn (tile 192)
+	SpawnRed                      // red team spawn (tile 193)
+	SpawnBlue                     // blue team spawn (tile 194)
+)
+
+// SpawnPoint is a spawn location in the game layer.
+type SpawnPoint struct {
+	X, Y int // tile coordinates (column, row)
+	Type SpawnType
+}
+
+// SpawnPoints returns all spawn points found in the game layer, ordered
+// from top-left to bottom-right (first by Y ascending, then by X ascending).
+func (m *Map) SpawnPoints() []SpawnPoint {
+	var spawns []SpawnPoint
+	for _, g := range m.Groups {
+		for _, l := range g.Layers {
+			if l.Kind != LayerKindGame {
+				continue
+			}
+			for i, t := range l.Tiles {
+				if !IsSpawn(t.ID) {
+					continue
+				}
+				var st SpawnType
+				switch t.ID {
+				case TileSpawnRed:
+					st = SpawnRed
+				case TileSpawnBlue:
+					st = SpawnBlue
+				default:
+					st = SpawnGeneric
+				}
+				spawns = append(spawns, SpawnPoint{
+					X:    i % l.Width,
+					Y:    i / l.Width,
+					Type: st,
+				})
+			}
+		}
+	}
+	// Tiles are iterated row-by-row, so the result is already
+	// sorted top-left to bottom-right (Y asc, then X asc).
+	return spawns
+}
+
 // GameLayers returns all game layers (LayerKindGame) found in the map.
 func (m *Map) GameLayers() []Layer {
 	var layers []Layer
