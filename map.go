@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"time"
 )
 
 // ── map item type IDs (from datafile spec) ───────────────────────────────────
@@ -101,9 +102,18 @@ const (
 	CurveBezier CurveType = 5
 )
 
+// EnvelopeChannels identifies the number of active channels in an envelope.
+type EnvelopeChannels uint32
+
+const (
+	EnvelopeChannelsSound    EnvelopeChannels = 1
+	EnvelopeChannelsPosition EnvelopeChannels = 3
+	EnvelopeChannelsColor    EnvelopeChannels = 4
+)
+
 // EnvPoint represents a single control point in an envelope.
 type EnvPoint struct {
-	Time      int32 // milliseconds
+	Time      time.Duration // milliseconds in the map file
 	CurveType CurveType
 	Values    [4]int32 // 22.10 fixed-point; meaning depends on envelope type
 }
@@ -111,7 +121,7 @@ type EnvPoint struct {
 // Envelope represents an animation envelope (position, color, or sound).
 type Envelope struct {
 	Name         string
-	Channels     int32 // 1=sound, 3=position, 4=color
+	Channels     EnvelopeChannels
 	Synchronized bool
 	Points       []EnvPoint
 }
@@ -129,16 +139,24 @@ type SoundSource struct {
 	Position       Point
 	Loop           bool
 	Panning        bool
-	Delay          int32 // seconds
+	Delay          time.Duration // seconds in the map file
 	Falloff        uint8
 	PosEnv         int32
-	PosEnvOffset   int32
+	PosEnvOffset   time.Duration // milliseconds in the map file
 	SoundEnv       int32
-	SoundEnvOffset int32
-	ShapeType      int32 // 0=rectangle, 1=circle
+	SoundEnvOffset time.Duration // milliseconds in the map file
+	ShapeType      ShapeType
 	ShapeWidth     int32 // 22.10 fxp (rect width or circle radius)
 	ShapeHeight    int32 // 22.10 fxp (rect height; unused for circle)
 }
+
+// ShapeType identifies the geometric shape of a sound source.
+type ShapeType uint32
+
+const (
+	ShapeTypeRectangle ShapeType = 0
+	ShapeTypeCircle    ShapeType = 1
+)
 
 // ── Quad ─────────────────────────────────────────────────────────────────────
 
@@ -149,9 +167,9 @@ type Quad struct {
 	Colors         [4]color.NRGBA
 	TexCoords      [4]Point
 	PosEnv         int32
-	PosEnvOffset   int32
+	PosEnvOffset   time.Duration // milliseconds in the map file
 	ColorEnv       int32
-	ColorEnvOffset int32
+	ColorEnvOffset time.Duration // milliseconds in the map file
 }
 
 // Point is a 2D coordinate (fixed-point 17.15 in the datafile).
@@ -254,9 +272,9 @@ type Layer struct {
 	ColorG         uint8
 	ColorB         uint8
 	ColorA         uint8
-	ImageID        int   // -1 = no image
-	ColorEnv       int32 // envelope index, -1 = none
-	ColorEnvOffset int32
+	ImageID        int           // -1 = no image
+	ColorEnv       int32         // envelope index, -1 = none
+	ColorEnvOffset time.Duration // milliseconds in the map file
 	Tiles          []Tile
 
 	// DDNet special tile data (only set for the corresponding layer kind)
@@ -275,6 +293,26 @@ type Layer struct {
 
 	// Name
 	Name string
+}
+
+// HasImage reports whether the layer references a regular tileset image.
+func (l *Layer) HasImage() bool {
+	return l != nil && l.ImageID >= 0
+}
+
+// HasColorEnv reports whether the layer references a color envelope.
+func (l *Layer) HasColorEnv() bool {
+	return l != nil && l.ColorEnv >= 0
+}
+
+// HasQuadImage reports whether the layer references a quads image.
+func (l *Layer) HasQuadImage() bool {
+	return l != nil && l.QuadImageID >= 0
+}
+
+// HasSound reports whether the layer references a sound resource.
+func (l *Layer) HasSound() bool {
+	return l != nil && l.SoundID >= 0
 }
 
 // IsPhysics returns true for game/front/tele/speedup/switch/tune layers.
@@ -754,7 +792,7 @@ func parseTilemapLayer(df *datafile, data []int32, layerFlags uint32) (Layer, er
 		ColorB:         uint8(data[9]),
 		ColorA:         uint8(data[10]),
 		ColorEnv:       data[11],
-		ColorEnvOffset: data[12],
+		ColorEnvOffset: millisToDuration(data[12]),
 		ImageID:        int(data[13]),
 	}
 
@@ -1063,13 +1101,13 @@ func decodeSoundSources(data []byte, numSources int) []SoundSource {
 			Position:       readPoint(data[off:]),
 			Loop:           readI32(data[off+8:]) != 0,
 			Panning:        readI32(data[off+12:]) != 0,
-			Delay:          readI32(data[off+16:]),
+			Delay:          secondsToDuration(readI32(data[off+16:])),
 			Falloff:        uint8(readI32(data[off+20:])),
 			PosEnv:         readI32(data[off+24:]),
-			PosEnvOffset:   readI32(data[off+28:]),
+			PosEnvOffset:   millisToDuration(readI32(data[off+28:])),
 			SoundEnv:       readI32(data[off+32:]),
-			SoundEnvOffset: readI32(data[off+36:]),
-			ShapeType:      readI32(data[off+40:]),
+			SoundEnvOffset: millisToDuration(readI32(data[off+36:])),
+			ShapeType:      ShapeType(uint32(readI32(data[off+40:]))),
 			ShapeWidth:     readI32(data[off+44:]),
 			ShapeHeight:    readI32(data[off+48:]),
 		}
@@ -1089,13 +1127,13 @@ func decodeSoundSourcesLegacy(data []byte, numSources int) []SoundSource {
 			Position:       readPoint(data[off:]),
 			Loop:           readI32(data[off+8:]) != 0,
 			Panning:        true,
-			Delay:          readI32(data[off+12:]),
+			Delay:          secondsToDuration(readI32(data[off+12:])),
 			Falloff:        0,
 			PosEnv:         readI32(data[off+20:]),
-			PosEnvOffset:   readI32(data[off+24:]),
+			PosEnvOffset:   millisToDuration(readI32(data[off+24:])),
 			SoundEnv:       readI32(data[off+28:]),
-			SoundEnvOffset: readI32(data[off+32:]),
-			ShapeType:      1, // circle
+			SoundEnvOffset: millisToDuration(readI32(data[off+32:])),
+			ShapeType:      ShapeTypeCircle,
 			ShapeWidth:     radius,
 			ShapeHeight:    0,
 		}
@@ -1142,7 +1180,7 @@ func parseEnvelopes(df *datafile) ([]Envelope, error) {
 		numPoints := int(item.Data[3])
 
 		env := Envelope{
-			Channels: channels,
+			Channels: EnvelopeChannels(uint32(channels)),
 		}
 
 		// name (8 int32s, starting at index 4)
@@ -1188,7 +1226,7 @@ func parseEnvPoints(df *datafile, hasBezier bool) ([]EnvPoint, error) {
 			break
 		}
 		points[i] = EnvPoint{
-			Time:      pointItem.Data[base],
+			Time:      millisToDuration(pointItem.Data[base]),
 			CurveType: CurveType(pointItem.Data[base+1]),
 			Values: [4]int32{
 				pointItem.Data[base+2],
@@ -1362,9 +1400,9 @@ func decodeQuads(data []byte, numQuads int) []Quad {
 
 		// envelope references (4 int32s)
 		q.PosEnv = readI32(data[off:])
-		q.PosEnvOffset = readI32(data[off+4:])
+		q.PosEnvOffset = millisToDuration(readI32(data[off+4:]))
 		q.ColorEnv = readI32(data[off+8:])
-		q.ColorEnvOffset = readI32(data[off+12:])
+		q.ColorEnvOffset = millisToDuration(readI32(data[off+12:]))
 
 		quads[qi] = q
 	}
@@ -1415,4 +1453,20 @@ func clampByte(v int32) uint8 {
 		return 255
 	}
 	return uint8(v)
+}
+
+func millisToDuration(v int32) time.Duration {
+	return time.Duration(v) * time.Millisecond
+}
+
+func secondsToDuration(v int32) time.Duration {
+	return time.Duration(v) * time.Second
+}
+
+func durationToMillisInt32(v time.Duration) int32 {
+	return int32(v / time.Millisecond)
+}
+
+func durationToSecondsInt32(v time.Duration) int32 {
+	return int32(v / time.Second)
 }

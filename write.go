@@ -195,7 +195,7 @@ func (m *Map) writeEnvelopes(b *datafileBuilder) {
 	for i, env := range m.Envelopes {
 		startPoint := pointOffset
 		for _, pt := range env.Points {
-			allPoints = append(allPoints, pt.Time, int32(pt.CurveType),
+			allPoints = append(allPoints, durationToMillisInt32(pt.Time), int32(pt.CurveType),
 				pt.Values[0], pt.Values[1], pt.Values[2], pt.Values[3])
 		}
 		pointOffset += len(env.Points)
@@ -203,7 +203,7 @@ func (m *Map) writeEnvelopes(b *datafileBuilder) {
 		// Envelope item: [version, channels, startPoint, numPoints, name[8], synchronized]
 		data := make([]int32, 13)
 		data[0] = 2 // version (v2 = synchronized)
-		data[1] = env.Channels
+		data[1] = int32(env.Channels)
 		data[2] = int32(startPoint)
 		data[3] = int32(len(env.Points))
 		nameI32 := encodeI32String(env.Name, 8)
@@ -312,7 +312,7 @@ func writeTilemapLayer(b *datafileBuilder, l *Layer, id uint16) {
 	data[9] = int32(l.ColorB)
 	data[10] = int32(l.ColorA)
 	data[11] = l.ColorEnv
-	data[12] = l.ColorEnvOffset
+	data[12] = durationToMillisInt32(l.ColorEnvOffset)
 	data[13] = int32(l.ImageID)
 	data[14] = tileDataIdx
 
@@ -495,9 +495,9 @@ func encodeQuads(quads []Quad) []byte {
 			off += 8
 		}
 		writeI32Bytes(buf[off:], q.PosEnv)
-		writeI32Bytes(buf[off+4:], q.PosEnvOffset)
+		writeI32Bytes(buf[off+4:], durationToMillisInt32(q.PosEnvOffset))
 		writeI32Bytes(buf[off+8:], q.ColorEnv)
-		writeI32Bytes(buf[off+12:], q.ColorEnvOffset)
+		writeI32Bytes(buf[off+12:], durationToMillisInt32(q.ColorEnvOffset))
 	}
 	return buf
 }
@@ -517,13 +517,13 @@ func encodeSoundSources(sources []SoundSource) []byte {
 		}
 		writeI32Bytes(buf[off+8:], loopV)
 		writeI32Bytes(buf[off+12:], panV)
-		writeI32Bytes(buf[off+16:], s.Delay)
+		writeI32Bytes(buf[off+16:], durationToSecondsInt32(s.Delay))
 		writeI32Bytes(buf[off+20:], int32(s.Falloff))
 		writeI32Bytes(buf[off+24:], s.PosEnv)
-		writeI32Bytes(buf[off+28:], s.PosEnvOffset)
+		writeI32Bytes(buf[off+28:], durationToMillisInt32(s.PosEnvOffset))
 		writeI32Bytes(buf[off+32:], s.SoundEnv)
-		writeI32Bytes(buf[off+36:], s.SoundEnvOffset)
-		writeI32Bytes(buf[off+40:], s.ShapeType)
+		writeI32Bytes(buf[off+36:], durationToMillisInt32(s.SoundEnvOffset))
+		writeI32Bytes(buf[off+40:], int32(s.ShapeType))
 		writeI32Bytes(buf[off+44:], s.ShapeWidth)
 		writeI32Bytes(buf[off+48:], s.ShapeHeight)
 	}

@@ -29,14 +29,18 @@ suitable for inspection, modification, writing, validation, or rendering.
 - **External tilesets** — optional `external/mapres` sub-package ships
   embedded PNGs for common DDNet/Teeworlds tilesets, registered
   automatically via blank import (like `image/png` and `image/jpeg`).
+- **Entity-layer sprites** — optional `external/entities` sub-package embeds
+  DDNet's `entities.png` overlay sheet for rendering game/front/tele/
+  speedup/switch/tune layers.
 - **Game skin sprites** — optional `external/gameskin` sub-package embeds
   the DDNet game.png sprite sheet for rendering pickups, flags, and spawns
   with actual game sprites via `WithEntities(true)`. Override with your own
   skin via `RegisterGameSkin`.
 - **Particle sprites** — optional `external/particles` sub-package embeds
   the DDNet particles.png sprite sheet.
-- **RegisterExternalImage / RegisterGameSkin** — public APIs for
-  registering custom tilesets and game skins from your own packages.
+- **RegisterExternalImage / RegisterEntitiesImage / RegisterGameSkin** — public
+  APIs for registering custom tilesets, entity overlay sheets, and game skins
+  from your own packages.
 - **Game-layer tile IDs** — exported constants for all DDNet game-layer
   tile types (`TileAir`, `TileSolid`, `TileFreeze`, …) and helper
   functions (`IsSolid`, `IsPassable`).
@@ -104,15 +108,11 @@ func main() {
 
 ### Writing
 
-| Function                         | Description                                                                  |
-| -------------------------------- | ---------------------------------------------------------------------------- |
-| `(*Map).Write(w io.Writer) error` | Serialise the map into the Teeworlds datafile (v4) format, written to `w`. |
+- `(*Map).Write(w io.Writer) error` — Serialise the map into the Teeworlds datafile (v4) format, written to `w`.
 
 ### Validation
 
-| Function                                          | Description                                                  |
-| ------------------------------------------------- | ------------------------------------------------------------ |
-| `Validate(r io.Reader, opts ...ParseOption) error` | Parses and validates the structural integrity of a map file. |
+- `Validate(r io.Reader, opts ...ParseOption) error` — Parses and validates the structural integrity of a map file.
 
 **Validation checks:**
 
@@ -127,31 +127,37 @@ func main() {
 
 ### Rendering
 
-| Function / Type                                                            | Description                                                                                           |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `Render(r io.Reader, opts ...RenderOption) (*image.NRGBA, error)`          | Parse + render in one step.                                                                           |
-| `RenderMap(m *Map, opts ...RenderOption) (*image.NRGBA, error)`            | Render from an already-parsed `Map`.                                                                  |
-| `(*Map).Bounds() MapBounds`                                                | Bounding box (in tile coords) of all non-air tiles across renderable layers.                          |
-| `MapBounds{MinX, MinY, MaxX, MaxY int}`                                    | Axis-aligned bounding box with `Width()` and `Height()` helpers.                                      |
-| `WithMaxSize(maxW, maxH int) RenderOption`                                 | Constrain output to maxW×maxH (default: native tileset resolution).                                   |
-| `WithRegion(region MapBounds) RenderOption`                                | Render only a sub-section of the map.                                                                 |
-| `WithParseOptions(opts ...ParseOption) RenderOption`                       | Pass parse options to `Render` (ignored by `RenderMap`).                                              |
-| `RegisterExternalImage(name string, img *image.NRGBA)`                     | Register a tileset for use during rendering.                                                          |
-| `WithEntities(entities bool) RenderOption`                                 | Render game-layer entities (pickups, flags) using game skin sprites at DDNet proportions.              |
-| `WithGameLayer(gameLayer bool) RenderOption`                               | Render game layer tiles as a semi-transparent overlay (shows solid, hookable, freeze, spawns, etc.).  |
-| `RegisterGameSkin(img *image.NRGBA)`                                       | Register a custom game skin image (1024×512, 32×16 grid) for entity rendering.                        |
-| `RegisterParticleImage(img *image.NRGBA)`                                  | Register a particle sprite sheet.                                                                     |
+- `Render(r io.Reader, opts ...RenderOption) (*image.NRGBA, error)` — Parse + render in one step.
+- `RenderMap(m *Map, opts ...RenderOption) (*image.NRGBA, error)` — Render from an already-parsed `Map`.
+- `(*Map).Bounds() MapBounds` — Bounding box (in tile coords) of all non-air tiles across renderable layers.
+- `MapBounds{MinX, MinY, MaxX, MaxY int}` — Axis-aligned bounding box with `Width()` and `Height()` helpers.
+- `WithMaxSize(maxW, maxH int) RenderOption` — Constrain output to maxW×maxH (default: native tileset resolution).
+- `WithRegion(region MapBounds) RenderOption` — Render only a sub-section of the map.
+- `WithParseOptions(opts ...ParseOption) RenderOption` — Pass parse options to `Render` (ignored by `RenderMap`).
+- `RegisterExternalImage(name string, img *image.NRGBA)` — Register a tileset for use during rendering.
+- `RegisterEntitiesImage(img *image.NRGBA)` — Register a DDNet entity-layer sprite sheet (`entities.png`).
+- `WithEntities(entities bool) RenderOption` — Render game-layer entity sprites (pickups/flags and DDNet weapon-removal pickups) at DDNet proportions.
+- `WithGameLayer(gameLayer bool) RenderOption` — Render the game layer as a semi-transparent entities overlay.
+- `WithFrontLayer(frontLayer bool) RenderOption` — Render the DDNet front layer as a semi-transparent entities overlay.
+- `WithTeleLayer(teleLayer bool) RenderOption` — Render the DDNet tele layer.
+- `WithSpeedupLayer(speedupLayer bool) RenderOption` — Render the DDNet speedup layer.
+- `WithSwitchLayer(switchLayer bool) RenderOption` — Render the DDNet switch layer.
+- `WithTuneLayer(tuneLayer bool) RenderOption` — Render the DDNet tune layer.
+- `WithParticles(particles bool) RenderOption` — Render a static (non-animated) particle/capability marker pass from particles.png.
+- `RegisterGameSkin(img *image.NRGBA)` — Register a custom game skin image (1024×512, 32×16 grid) for entity rendering.
+- `RegisterParticleImage(img *image.NRGBA)` — Register a particle sprite sheet.
 
 To make the default DDNet/Teeworlds assets available, add a blank import:
 
 ```go
-import _ "github.com/jxsl13/twmap/external" // registers mapres + gameskin + particles
+import _ "github.com/jxsl13/twmap/external" // registers mapres + entities + gameskin + particles
 ```
 
 Or import only what you need:
 
 ```go
 import _ "github.com/jxsl13/twmap/external/mapres"     // tileset images
+import _ "github.com/jxsl13/twmap/external/entities"   // DDNet entity-layer overlay sheet
 import _ "github.com/jxsl13/twmap/external/gameskin"   // game skin (pickups, flags, spawns)
 import _ "github.com/jxsl13/twmap/external/particles"  // particle sprites
 ```
@@ -162,11 +168,19 @@ corresponding `twmap.Register*` function. You can create your own
 asset packages the same way, or call `RegisterGameSkin` directly to
 override the default game skin with a custom one.
 
+DDNet itself treats these asset families separately:
+
+- `mapres` contains visual map tilesets used by regular tile layers.
+- `entities.png` is a dedicated entity-layer overlay sheet used for game/front/tele/speedup/switch/tune visualization.
+- `game.png` is the runtime game skin used for pickups and flags.
+- `particles.png` is the particle/effects sheet.
+
 **Rendering details:**
 
 - Only groups with parallax 100/100 and no clipping are rendered.
-- Physics layers (game, tele, speedup, front, switch, tune) and detail
-  layers are excluded (detail can be enabled with `WithDetail(true)`).
+- Physics layers (game/front/tele/speedup/switch/tune) are excluded by
+  default and can be enabled individually with dedicated options.
+  Detail layers are also excluded by default (enable via `WithDetail(true)`).
 - When `WithEntities(true)` is set and a game skin is registered, entity
   sprites (hearts, shields, weapons, flags) are drawn from the game skin
   at their DDNet client proportions (spanning multiple tiles). Without a
@@ -174,8 +188,14 @@ override the default game skin with a custom one.
   as entity sprites — use `WithGameLayer(true)` to make them visible.
 - When `WithGameLayer(true)` is set, game layer tiles (solid, hookable,
   freeze, spawns, checkpoints, etc.) are rendered as a semi-transparent
-  overlay using the entities tileset, matching the DDNet editor's entity
-  overlay / `cl_overlay_entities` display.
+  overlay using the dedicated entity-layer sheet from `external/entities`,
+  matching the DDNet editor's entity overlay / `cl_overlay_entities` display.
+- `WithFrontLayer`, `WithTeleLayer`, `WithSpeedupLayer`, `WithSwitchLayer`,
+  and `WithTuneLayer` enable rendering of the corresponding DDNet physics
+  layers individually. Tele, switch, tune, and speedup overlays also render
+  DDNet-style numeric labels when there is enough tile space available.
+- When `WithParticles(true)` is set and a particle sheet is registered,
+  static (non-animated) particle/capability markers are rendered.
 - The output is cropped to the bounding box of non-air tiles (or the region
   specified via `WithRegion`) and, when `WithMaxSize` is used, scaled to fit
   within the requested dimensions while preserving aspect ratio.
@@ -208,10 +228,8 @@ Map
 
 #### Map version
 
-| Constant       | Value | Description                     |
-| -------------- | ----- | ------------------------------- |
-| `MapVersion06` | 1     | Teeworlds 0.6 / DDNet          |
-| `MapVersion07` | 2     | Teeworlds 0.7                  |
+- `MapVersion06` = `1` — Teeworlds 0.6 / DDNet
+- `MapVersion07` = `2` — Teeworlds 0.7
 
 #### Layer kinds
 
@@ -230,12 +248,10 @@ Map
 
 #### Helper methods
 
-| Method / Function              | Description                                               |
-| ------------------------------ | --------------------------------------------------------- |
-| `(*Layer).IsPhysics() bool`    | True for game/front/tele/speedup/switch/tune layers.      |
-| `(*Layer).IsTilemap() bool`    | True for any tilemap-based layer (physics or regular).    |
-| `(*Map).GameLayers() []Layer`  | Returns all game layers found in the map.                 |
-| `(*Group).IsPhysicsGroup() bool` | True if the group contains any physics layers.          |
+- `(*Layer).IsPhysics() bool` — True for game/front/tele/speedup/switch/tune layers.
+- `(*Layer).IsTilemap() bool` — True for any tilemap-based layer (physics or regular).
+- `(*Map).GameLayers() []Layer` — Returns all game layers found in the map.
+- `(*Group).IsPhysicsGroup() bool` — True if the group contains any physics layers.
 
 #### Tile flags
 
@@ -252,10 +268,8 @@ The package exports constants for all DDNet game-layer tile types
 (e.g. `TileAir`, `TileSolid`, `TileDeath`, `TileUnhookable`, `TileFreeze`,
 `TileStart`, `TileFinish`, …) and two helper functions:
 
-| Function                    | Description                                                      |
-| --------------------------- | ---------------------------------------------------------------- |
-| `IsSolid(id uint8) bool`   | True if the tile blocks player movement (solid or unhookable).   |
-| `IsPassable(id uint8) bool` | True if a player can move through the tile (not solid/death/freeze). |
+- `IsSolid(id uint8) bool` — True if the tile blocks player movement (solid or unhookable).
+- `IsPassable(id uint8) bool` — True if a player can move through the tile (not solid/death/freeze).
 
 #### Envelope curve types
 
@@ -305,7 +319,7 @@ make vet    # go vet ./...
 
 The image assets bundled in the `external/` sub-packages originate from the
 [DDNet project](https://github.com/ddnet/ddnet) and are released under
-**CC-BY-SA 3.0** (https://creativecommons.org/licenses/by-sa/3.0/) as stated
+**CC-BY-SA 3.0** ([creativecommons.org/licenses/by-sa/3.0/](https://creativecommons.org/licenses/by-sa/3.0/)) as stated
 in DDNet's [license.txt](https://github.com/ddnet/ddnet/blob/master/license.txt).
 
 | Package | Image(s) | Source path in DDNet | License file |

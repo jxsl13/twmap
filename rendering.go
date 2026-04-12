@@ -6,8 +6,7 @@ import (
 	"image/color"
 	"io"
 	"math"
-
-	"golang.org/x/image/draw"
+	"strconv"
 )
 
 // DDNet editor checkerboard background colors.
@@ -54,9 +53,16 @@ type renderOptions struct {
 	maxHeight    int        // 0 = use native resolution
 	region       *MapBounds // nil = full non-air bounding box
 	detail       bool       // include detail layers
-	entities     bool       // render entity icons (pickups, flags, spawns)
-	gameLayer    bool       // render game layer tiles (entities overlay)
-	viewport     *viewport  // nil = skip parallax groups
+	disabledBase map[LayerKind]struct{}
+	entities     bool      // render entity icons (pickups, flags, spawns)
+	particles    bool      // render static particle/capability markers
+	gameLayer    bool      // render game layer tiles (entities overlay)
+	frontLayer   bool      // render front layer tiles (entities overlay)
+	teleLayer    bool      // render tele layer tiles
+	speedupLayer bool      // render speedup layer tiles
+	switchLayer  bool      // render switch layer tiles
+	tuneLayer    bool      // render tune layer tiles
+	viewport     *viewport // nil = skip parallax groups
 	parseOptions []ParseOption
 }
 
@@ -103,8 +109,22 @@ func WithDetail(detail bool) RenderOption {
 	}
 }
 
+// WithoutBaseLayerKinds disables layer kinds from the normal base-design pass.
+// This is useful for selectively omitting quads or other regular layers while
+// keeping the rest of the renderer active.
+func WithoutBaseLayerKinds(kinds ...LayerKind) RenderOption {
+	return func(o *renderOptions) {
+		if o.disabledBase == nil {
+			o.disabledBase = make(map[LayerKind]struct{}, len(kinds))
+		}
+		for _, kind := range kinds {
+			o.disabledBase[kind] = struct{}{}
+		}
+	}
+}
+
 // WithEntities enables rendering of game-layer entity icons (pickups,
-// flags, and spawn points). When a game skin is registered (via
+// flags, and DDNet weapon-removal pickups). When a game skin is registered (via
 // [RegisterGameSkin] or by importing the gameskin package), the actual
 // sprite images from the skin are drawn. Without a game skin, colored
 // circles are used as a fallback.
@@ -126,13 +146,57 @@ func WithEntities(entities bool) RenderOption {
 // spawns, checkpoints, etc.) visible, matching the DDNet editor's entity
 // overlay / cl_overlay_entities display.
 //
-// Requires the entities tileset to be registered, which is done by
-// importing the external/mapres package (included in external):
+// Requires the entities sprite sheet to be registered, which is done by
+// importing the external/entities package (included in external):
 //
-//	import _ "github.com/jxsl13/twmap/external/mapres"
+//	import _ "github.com/jxsl13/twmap/external/entities"
 func WithGameLayer(gameLayer bool) RenderOption {
 	return func(o *renderOptions) {
 		o.gameLayer = gameLayer
+	}
+}
+
+// WithFrontLayer enables rendering of the DDNet front layer as a
+// semi-transparent entities overlay.
+func WithFrontLayer(frontLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.frontLayer = frontLayer
+	}
+}
+
+// WithTeleLayer enables rendering of the DDNet tele layer.
+func WithTeleLayer(teleLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.teleLayer = teleLayer
+	}
+}
+
+// WithSpeedupLayer enables rendering of the DDNet speedup layer.
+func WithSpeedupLayer(speedupLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.speedupLayer = speedupLayer
+	}
+}
+
+// WithSwitchLayer enables rendering of the DDNet switch layer.
+func WithSwitchLayer(switchLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.switchLayer = switchLayer
+	}
+}
+
+// WithTuneLayer enables rendering of the DDNet tune layer.
+func WithTuneLayer(tuneLayer bool) RenderOption {
+	return func(o *renderOptions) {
+		o.tuneLayer = tuneLayer
+	}
+}
+
+// WithParticles enables a static (non-animated) particle/capability pass.
+// The sprites are sourced from the registered particles image.
+func WithParticles(particles bool) RenderOption {
+	return func(o *renderOptions) {
+		o.particles = particles
 	}
 }
 
@@ -147,9 +211,9 @@ func WithCameraAt(tileX, tileY int) RenderOption {
 
 // WithCamera sets the camera center (in tile coordinates) and enables
 // rendering of groups with parallax other than 100/100.  Each group's
-// effective offset is computed using the Teeworlds parallax formula:
+// effective offset is computed using DDNet's world mapping projection:
 //
-//	effective = camera * (1 - parallax/100) + group_offset
+//	effective = camera * (1 - parallax/100) - group_offset
 //
 // Without a camera, only groups with parallax 100/100 are rendered.
 func WithCamera(x, y float64) RenderOption {
@@ -170,7 +234,8 @@ func WithCamera(x, y float64) RenderOption {
 //   - Tile flags (vflip, hflip, rotate) are handled
 //   - Layer colors modulate the tileset/texture pixels
 //   - Quads are rasterized with barycentric interpolation (vertex colors + textures)
-//   - Physics/special layers and detail layers are excluded
+//   - Physics/special layers and detail layers are excluded by default
+//     (can be enabled with dedicated render options)
 func Render(r io.Reader, opts ...RenderOption) (*image.NRGBA, error) {
 	var ro renderOptions
 	for _, fn := range opts {
@@ -193,8 +258,8 @@ type renderLayer struct {
 	tiles   []Tile
 	width   int
 	height  int
-	offsetX int // group offset in tiles (offsetX / pixelsPerTile)
-	offsetY int // group offset in tiles (offsetY / pixelsPerTile)
+	offsetX float64 // group offset in tiles (float for sub-tile precision)
+	offsetY float64 // group offset in tiles (float for sub-tile precision)
 }
 
 // renderQuadLayer is a collected quad layer ready for rendering.
@@ -211,6 +276,18 @@ type renderStep struct {
 	isTile bool
 	tile   renderLayer
 	quad   renderQuadLayer
+}
+
+// overlayRenderLayer represents one DDNet physics/entity overlay layer in the
+// final overlay pass. Most layers use the generic tile renderer; speedup keeps
+// its source data for custom arrow rendering.
+type overlayRenderLayer struct {
+	kind         LayerKind
+	layer        renderLayer
+	teleTiles    []TeleTile
+	speedupTiles []SpeedupTile
+	switchTiles  []SwitchTile
+	tuneTiles    []TuneTile
 }
 
 // RenderMap renders an already-parsed Map as an image.
@@ -253,13 +330,16 @@ func nativeTileLen(m *Map, layers []renderLayer) uint32 {
 func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 	// ── 1. Collect all renderable layers (tiles + quads) in order ────────
 	steps := collectRenderSteps(m, ro)
-	if len(steps) == 0 {
+	overlayLayers := collectOverlayRenderLayers(m, ro, false)
+	if len(steps) == 0 && len(overlayLayers) == 0 && !ro.entities && !ro.particles {
 		return image.NewNRGBA(image.Rect(0, 0, 1, 1)), nil
 	}
 
 	// ── 2. Determine crop region ─────────────────────────────────────────
 	tileLayers := extractTileLayers(steps)
-	crop := cropToNonAir(tileLayers)
+	boundsLayers := append([]renderLayer{}, tileLayers...)
+	boundsLayers = append(boundsLayers, overlayLayersToBoundsLayers(collectOverlayRenderLayers(m, ro, true))...)
+	crop := cropToNonAir(boundsLayers)
 	if ro.region != nil {
 		crop = *ro.region
 	}
@@ -290,15 +370,18 @@ func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 	fillCheckerboard(canvas, tileLen)
 	renderAllSteps(canvas, steps, tilesets, quadImages, &crop, tileLen)
 
-	// ── 5b. Render entity icons (pickups, flags, spawns) ─────────────────
-	if ro.entities {
-		renderEntities(canvas, m, &crop, tileLen)
+	// ── 5b. Render static particle/capability markers behind overlays ────
+	if ro.particles {
+		renderParticles(canvas, m, ro, &crop, tileLen)
 	}
 
-	// ── 5c. Render game layer overlay (entities.png) ─────────────────────
-	if ro.gameLayer {
-		renderGameLayer(canvas, m, &crop, tileLen)
+	// ── 5c. Render entity icons (pickups, flags) below DDNet physics layers ──
+	if ro.entities {
+		renderEntities(canvas, m, ro, &crop, tileLen)
 	}
+
+	// ── 5d. Render selected DDNet physics/entity tile layers last ────────
+	renderOverlayLayers(canvas, overlayLayers, &crop, tileLen)
 
 	// ── 6. Scale to output bounding box (only when max size is set) ──────
 	if useMaxSize {
@@ -312,47 +395,26 @@ func renderMap(m *Map, ro *renderOptions) (*image.NRGBA, error) {
 // back-to-front order.  By default only groups with parallax 100/100 are
 // included and detail layers are skipped.  When a viewport is set, groups
 // with other parallax values are also included and their offsets are computed
-// using the Teeworlds parallax formula.  When detail is enabled, detail
+// using DDNet world mapping projection.  When detail is enabled, detail
 // layers are included.
 func collectRenderSteps(m *Map, ro *renderOptions) []renderStep {
 	var steps []renderStep
-	hasViewport := ro != nil && ro.viewport != nil
 	includeDetail := ro != nil && ro.detail
 
 	for i := range m.Groups {
 		g := &m.Groups[i]
 
-		isParallax100 := g.ParallaxX == 100 && g.ParallaxY == 100
-		if !isParallax100 && !hasViewport {
+		tileOffX, tileOffY, quadOffX, quadOffY, ok := computeGroupRenderOffsets(g, ro)
+		if !ok {
 			continue
 		}
-
-		// Compute effective group offset in game-pixels.
-		// DDNet world mapping uses screen points based on:
-		//   p0 = offset + center*parallax/100 - width/2
-		// Rewriting into a common 100/100 world plane for compositing gives:
-		//   effective = camera*(1-parallax/100) - offset
-		// For parallax 100% this reduces to -offset.
-		var effPixelX, effPixelY float64
-		if hasViewport {
-			camX := ro.viewport.centerX * float64(pixelsPerTile)
-			camY := ro.viewport.centerY * float64(pixelsPerTile)
-			effPixelX = camX*(1.0-float64(g.ParallaxX)/100.0) - float64(g.OffsetX)
-			effPixelY = camY*(1.0-float64(g.ParallaxY)/100.0) - float64(g.OffsetY)
-		} else {
-			effPixelX = -float64(g.OffsetX)
-			effPixelY = -float64(g.OffsetY)
-		}
-
-		// Group offset in game-pixels → tile units.
-		tileOffX := int(effPixelX) / pixelsPerTile
-		tileOffY := int(effPixelY) / pixelsPerTile
-		quadOffX := effPixelX / float64(pixelsPerTile)
-		quadOffY := effPixelY / float64(pixelsPerTile)
 
 		for j := range g.Layers {
 			l := &g.Layers[j]
 			if l.IsPhysics() {
+				continue
+			}
+			if baseLayerKindDisabled(ro, l.Kind) {
 				continue
 			}
 			if l.Detail && !includeDetail {
@@ -397,6 +459,285 @@ func collectRenderSteps(m *Map, ro *renderOptions) []renderStep {
 		}
 	}
 	return steps
+}
+
+func baseLayerKindDisabled(ro *renderOptions, kind LayerKind) bool {
+	if ro == nil || len(ro.disabledBase) == 0 {
+		return false
+	}
+	_, disabled := ro.disabledBase[kind]
+	return disabled
+}
+
+// computeGroupRenderOffsets converts a group's DDNet offset/parallax state
+// into unified offsets used by the software renderer.
+func computeGroupRenderOffsets(g *Group, ro *renderOptions) (tileOffX, tileOffY, quadOffX, quadOffY float64, ok bool) {
+	hasViewport := ro != nil && ro.viewport != nil
+	isParallax100 := g.ParallaxX == 100 && g.ParallaxY == 100
+	if !isParallax100 && !hasViewport {
+		return 0, 0, 0, 0, false
+	}
+
+	var effPixelX, effPixelY float64
+	if hasViewport {
+		camX := ro.viewport.centerX * float64(pixelsPerTile)
+		camY := ro.viewport.centerY * float64(pixelsPerTile)
+		effPixelX = camX*(1.0-float64(g.ParallaxX)/100.0) - float64(g.OffsetX)
+		effPixelY = camY*(1.0-float64(g.ParallaxY)/100.0) - float64(g.OffsetY)
+	} else {
+		effPixelX = -float64(g.OffsetX)
+		effPixelY = -float64(g.OffsetY)
+	}
+
+	tileOffX = effPixelX / float64(pixelsPerTile)
+	tileOffY = effPixelY / float64(pixelsPerTile)
+	quadOffX = effPixelX / float64(pixelsPerTile)
+	quadOffY = effPixelY / float64(pixelsPerTile)
+	return tileOffX, tileOffY, quadOffX, quadOffY, true
+}
+
+// collectOverlayRenderLayers collects DDNet physics/entity tile layers that are
+// explicitly enabled via render options.
+//
+// When boundsOnly is true, the game layer is also included if entity or
+// particle rendering is enabled, so bounds/cropping still work on maps without
+// visual tile layers.
+func collectOverlayRenderLayers(m *Map, ro *renderOptions, boundsOnly bool) []overlayRenderLayer {
+	if m == nil || ro == nil {
+		return nil
+	}
+
+	includeDetail := ro.detail
+	includeGame := ro.gameLayer
+	if boundsOnly && (ro.entities || ro.particles) {
+		includeGame = true
+	}
+	includeFront := ro.frontLayer
+	if boundsOnly && ro.particles {
+		includeFront = true
+	}
+	includeTele := ro.teleLayer
+	includeSpeedup := ro.speedupLayer
+	includeSwitch := ro.switchLayer
+	includeTune := ro.tuneLayer
+
+	if !includeGame && !includeFront && !includeTele && !includeSpeedup && !includeSwitch && !includeTune {
+		return nil
+	}
+
+	overlayColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	var out []overlayRenderLayer
+
+	for i := range m.Groups {
+		g := &m.Groups[i]
+		tileOffX, tileOffY, _, _, ok := computeGroupRenderOffsets(g, ro)
+		if !ok {
+			continue
+		}
+
+		for j := range g.Layers {
+			l := &g.Layers[j]
+			if l.Detail && !includeDetail {
+				continue
+			}
+
+			switch l.Kind {
+			case LayerKindGame:
+				if !includeGame || len(l.Tiles) == 0 {
+					continue
+				}
+				tiles := filterLayerTiles(l.Tiles, IsValidGameTile)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{kind: l.Kind, layer: renderLayer{
+					color:   overlayColor,
+					imageID: 0,
+					tiles:   tiles,
+					width:   l.Width,
+					height:  l.Height,
+					offsetX: tileOffX,
+					offsetY: tileOffY,
+				}})
+			case LayerKindFront:
+				if !includeFront || len(l.Tiles) == 0 {
+					continue
+				}
+				tiles := filterLayerTiles(l.Tiles, IsValidFrontTile)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{kind: l.Kind, layer: renderLayer{
+					color:   overlayColor,
+					imageID: 0,
+					tiles:   tiles,
+					width:   l.Width,
+					height:  l.Height,
+					offsetX: tileOffX,
+					offsetY: tileOffY,
+				}})
+			case LayerKindTele:
+				if !includeTele || len(l.TeleTiles) == 0 {
+					continue
+				}
+				tiles := convertTeleLayerTiles(l.TeleTiles)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{kind: l.Kind, layer: renderLayer{
+					color:   overlayColor,
+					imageID: 0,
+					tiles:   tiles,
+					width:   l.Width,
+					height:  l.Height,
+					offsetX: tileOffX,
+					offsetY: tileOffY,
+				}, teleTiles: l.TeleTiles})
+			case LayerKindSpeedup:
+				if !includeSpeedup || len(l.SpeedupTiles) == 0 {
+					continue
+				}
+				tiles := convertSpeedupLayerTiles(l.SpeedupTiles)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{
+					kind: LayerKindSpeedup,
+					layer: renderLayer{
+						color:   overlayColor,
+						imageID: -1,
+						tiles:   tiles,
+						width:   l.Width,
+						height:  l.Height,
+						offsetX: tileOffX,
+						offsetY: tileOffY,
+					},
+					speedupTiles: l.SpeedupTiles,
+				})
+			case LayerKindSwitch:
+				if !includeSwitch || len(l.SwitchTiles) == 0 {
+					continue
+				}
+				tiles := convertSwitchLayerTiles(l.SwitchTiles)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{kind: l.Kind, layer: renderLayer{
+					color:   overlayColor,
+					imageID: 0,
+					tiles:   tiles,
+					width:   l.Width,
+					height:  l.Height,
+					offsetX: tileOffX,
+					offsetY: tileOffY,
+				}, switchTiles: l.SwitchTiles})
+			case LayerKindTune:
+				if !includeTune || len(l.TuneTiles) == 0 {
+					continue
+				}
+				tiles := convertTuneLayerTiles(l.TuneTiles)
+				if !hasNonAirTiles(tiles) {
+					continue
+				}
+				out = append(out, overlayRenderLayer{kind: l.Kind, layer: renderLayer{
+					color:   overlayColor,
+					imageID: 0,
+					tiles:   tiles,
+					width:   l.Width,
+					height:  l.Height,
+					offsetX: tileOffX,
+					offsetY: tileOffY,
+				}, tuneTiles: l.TuneTiles})
+			}
+		}
+	}
+
+	return out
+}
+
+func overlayLayersToBoundsLayers(layers []overlayRenderLayer) []renderLayer {
+	out := make([]renderLayer, 0, len(layers))
+	for i := range layers {
+		if hasNonAirTiles(layers[i].layer.tiles) {
+			out = append(out, layers[i].layer)
+		}
+	}
+	return out
+}
+
+func hasNonAirTiles(tiles []Tile) bool {
+	for i := range tiles {
+		if tiles[i].ID != TileAir {
+			return true
+		}
+	}
+	return false
+}
+
+func filterLayerTiles(src []Tile, keep func(uint8) bool) []Tile {
+	out := make([]Tile, len(src))
+	for i := range src {
+		out[i] = src[i]
+		if !keep(src[i].ID) {
+			out[i] = Tile{}
+		}
+	}
+	return out
+}
+
+func convertTeleLayerTiles(src []TeleTile) []Tile {
+	out := make([]Tile, len(src))
+	for i := range src {
+		if !IsValidTeleTile(src[i].ID) {
+			continue
+		}
+		out[i] = Tile{ID: src[i].ID}
+	}
+	return out
+}
+
+func convertTuneLayerTiles(src []TuneTile) []Tile {
+	out := make([]Tile, len(src))
+	for i := range src {
+		if !IsValidTuneTile(src[i].ID) {
+			continue
+		}
+		out[i] = Tile{ID: src[i].ID}
+	}
+	return out
+}
+
+func convertSwitchLayerTiles(src []SwitchTile) []Tile {
+	out := make([]Tile, len(src))
+	for i := range src {
+		id := src[i].ID
+		if !IsValidSwitchTile(id) {
+			continue
+		}
+		if id == TileSwitchTimedOpen {
+			id = 8
+		}
+		flags := src[i].Flags
+		if !IsSwitchTileFlagsUsed(src[i].ID) {
+			flags = 0
+		}
+		out[i] = Tile{ID: id, Flags: flags}
+	}
+	return out
+}
+
+func convertSpeedupLayerTiles(src []SpeedupTile) []Tile {
+	out := make([]Tile, len(src))
+	for i := range src {
+		id := src[i].ID
+		if (src[i].Force == 0 && id == TileSpeedBoostOld) ||
+			(src[i].Force == 0 && src[i].MaxSpeed == 0 && id == TileSpeedBoost) ||
+			!IsValidSpeedupTile(id) {
+			continue
+		}
+		out[i] = Tile{ID: id}
+	}
+	return out
 }
 
 // extractTileLayers returns only the tile renderLayers from the render steps.
@@ -482,10 +823,12 @@ func cropToNonAir(layers []renderLayer) MapBounds {
 	foundMaxX:
 
 		// Convert layer-local bounds to world tile coords via group offset.
-		wMinX := lminX + l.offsetX
-		wMinY := lminY + l.offsetY
-		wMaxX := lmaxX + l.offsetX
-		wMaxY := lmaxY + l.offsetY
+		// Fractional offsets can make the layer overlap one extra tile at the
+		// edges, so expand using floor/ceil like DDNet's screen mapping does.
+		wMinX := int(math.Floor(float64(lminX) + l.offsetX))
+		wMinY := int(math.Floor(float64(lminY) + l.offsetY))
+		wMaxX := int(math.Ceil(float64(lmaxX) + l.offsetX))
+		wMaxY := int(math.Ceil(float64(lmaxY) + l.offsetY))
 
 		if wMinX < r.MinX {
 			r.MinX = wMinX
@@ -551,9 +894,9 @@ func prepareTilesets(m *Map, layers []renderLayer, tileLen uint32) map[int]*imag
 			continue
 		}
 
-		// Scale tileset to resultSide × resultSide using area averaging
-		scaled := image.NewNRGBA(image.Rect(0, 0, resultSide, resultSide))
-		draw.ApproxBiLinear.Scale(scaled, scaled.Bounds(), srcRGBA, srcRGBA.Bounds(), draw.Src, nil)
+		// Scale tileset with the same bilinear resampler used for all other
+		// scaled PNG inputs (entities, particles, final output, etc.).
+		scaled := scaleImageRectNRGBA(srcRGBA, srcRGBA.Bounds(), resultSide, resultSide)
 
 		// Clear air tile (top-left tile)
 		clearAirTile(scaled, tileLen)
@@ -668,13 +1011,17 @@ func renderSingleTileLayer(
 	lcB := uint32(l.color.B)
 	lcA := uint32(l.color.A)
 
-	// Iterate over layer tiles that fall within the crop region.
+	canvasW := canvas.Bounds().Dx()
+	canvasH := canvas.Bounds().Dy()
+
+	// Iterate over layer tiles that overlap the crop region.
 	// Layer tile (lx,ly) maps to world tile (lx+offsetX, ly+offsetY).
-	// We render world tiles in [crop.minX, crop.maxX) × [crop.minY, crop.maxY).
-	startLayerY := crop.MinY - l.offsetY
-	endLayerY := crop.MaxY - l.offsetY
-	startLayerX := crop.MinX - l.offsetX
-	endLayerX := crop.MaxX - l.offsetX
+	// Fractional group offsets can cause partial overlap at the crop edges, so
+	// use floor/ceil instead of whole-tile truncation.
+	startLayerY := int(math.Floor(float64(crop.MinY) - l.offsetY))
+	endLayerY := int(math.Ceil(float64(crop.MaxY) - l.offsetY))
+	startLayerX := int(math.Floor(float64(crop.MinX) - l.offsetX))
+	endLayerX := int(math.Ceil(float64(crop.MaxX) - l.offsetX))
 	if startLayerY < 0 {
 		startLayerY = 0
 	}
@@ -687,8 +1034,6 @@ func renderSingleTileLayer(
 	if endLayerX > l.width {
 		endLayerX = l.width
 	}
-
-	tlBytes := tl * 4 // bytes per tile row in NRGBA
 
 	for layerY := startLayerY; layerY < endLayerY; layerY++ {
 		for layerX := startLayerX; layerX < endLayerX; layerX++ {
@@ -705,26 +1050,48 @@ func renderSingleTileLayer(
 			tileY := int(tile.ID) / tilesetGridSize
 
 			// Destination on canvas = world position minus crop origin.
-			worldX := layerX + l.offsetX
-			worldY := layerY + l.offsetY
-			baseDstY := (worldY - crop.MinY) * tl
-			baseDstX := (worldX - crop.MinX) * tl
+			// Use rounded output-pixel positions so DDNet's sub-tile group offset
+			// projection is preserved instead of being truncated to full tiles.
+			baseDstY := int(math.Round((float64(layerY) + l.offsetY - float64(crop.MinY)) * float64(tl)))
+			baseDstX := int(math.Round((float64(layerX) + l.offsetX - float64(crop.MinX)) * float64(tl)))
 			baseSrcX := tileX * tl
 			baseSrcY := tileY * tl
 
+			srcMinX, srcMinY := 0, 0
+			srcMaxX, srcMaxY := tl, tl
+			if baseDstX < 0 {
+				srcMinX = -baseDstX
+				baseDstX = 0
+			}
+			if baseDstY < 0 {
+				srcMinY = -baseDstY
+				baseDstY = 0
+			}
+			if baseDstX+(srcMaxX-srcMinX) > canvasW {
+				srcMaxX = srcMinX + canvasW - baseDstX
+			}
+			if baseDstY+(srcMaxY-srcMinY) > canvasH {
+				srcMaxY = srcMinY + canvasH - baseDstY
+			}
+			if srcMinX >= srcMaxX || srcMinY >= srcMaxY {
+				continue
+			}
+			drawW := srcMaxX - srcMinX
+
 			// Fast path: no flags + white color → row-copy from tileset
 			if tile.Flags == 0 && colorIsWhite {
-				for iy := range tl {
-					srcRowOff := (baseSrcY+iy)*tsStride + baseSrcX*4
-					if srcRowOff < 0 || srcRowOff+tlBytes > tsPixLen {
+				rowBytes := drawW * 4
+				for iy := srcMinY; iy < srcMaxY; iy++ {
+					srcRowOff := (baseSrcY+iy)*tsStride + (baseSrcX+srcMinX)*4
+					if srcRowOff < 0 || srcRowOff+rowBytes > tsPixLen {
 						continue
 					}
-					dstRowOff := (baseDstY+iy)*canvasStride + baseDstX*4
-					srcRow := tsPix[srcRowOff : srcRowOff+tlBytes]
-					dstRow := canvasPix[dstRowOff : dstRowOff+tlBytes]
+					dstRowOff := (baseDstY+(iy-srcMinY))*canvasStride + baseDstX*4
+					srcRow := tsPix[srcRowOff : srcRowOff+rowBytes]
+					dstRow := canvasPix[dstRowOff : dstRowOff+rowBytes]
 					// Check if the entire row is fully opaque (all alpha == 255)
 					allOpaque := true
-					for p := 3; p < tlBytes; p += 4 {
+					for p := 3; p < rowBytes; p += 4 {
 						if srcRow[p] != 255 {
 							allOpaque = false
 							break
@@ -736,7 +1103,7 @@ func renderSingleTileLayer(
 						continue
 					}
 					// Mixed row: pixel-by-pixel with simplified blending
-					for ix := range tl {
+					for ix := 0; ix < drawW; ix++ {
 						sp := ix * 4
 						pa := srcRow[sp+3]
 						if pa == 0 {
@@ -766,9 +1133,9 @@ func renderSingleTileLayer(
 			tableFlag := (flags & (TileFlagVFlip | TileFlagHFlip)) + ((flags & TileFlagRotate) >> 1)
 			last := tileLen - 1
 
-			for iy := range tl {
-				dstRowOff := (baseDstY + iy) * canvasStride
-				for ix := range tl {
+			for iy := srcMinY; iy < srcMaxY; iy++ {
+				dstRowOff := (baseDstY + (iy - srcMinY)) * canvasStride
+				for ix := srcMinX; ix < srcMaxX; ix++ {
 					tx, ty := transformTileCoord(tableFlag, uint32(ix), uint32(iy), last)
 
 					srcOff := (baseSrcY+int(ty))*tsStride + (baseSrcX+int(tx))*4
@@ -793,7 +1160,7 @@ func renderSingleTileLayer(
 						continue
 					}
 
-					dstOff := dstRowOff + (baseDstX+ix)*4
+					dstOff := dstRowOff + (baseDstX+(ix-srcMinX))*4
 					if pa == 255 {
 						canvasPix[dstOff] = pr
 						canvasPix[dstOff+1] = pg
@@ -956,16 +1323,6 @@ func rasterizeTriangle(
 	canvasPix := canvas.Pix
 	canvasStride := canvas.Stride
 
-	var texPix []uint8
-	var texStride, texW, texH int
-	if tex != nil {
-		texPix = tex.Pix
-		texStride = tex.Stride
-		tb := tex.Bounds()
-		texW = tb.Dx()
-		texH = tb.Dy()
-	}
-
 	// Pre-convert vertex colors to float64
 	cr0, cg0, cb0, ca0 := float64(c0.R), float64(c0.G), float64(c0.B), float64(c0.A)
 	cr1, cg1, cb1, ca1 := float64(c1.R), float64(c1.G), float64(c1.B), float64(c1.A)
@@ -1004,25 +1361,11 @@ func rasterizeTriangle(
 			if tex != nil {
 				tu := w0*u0 + w1*u1 + w2*u2
 				tv := w0*v0 + w1*v1 + w2*v2
-				txp := int(tu * float64(texW))
-				typ := int(tv * float64(texH))
-				if txp < 0 {
-					txp = 0
-				}
-				if typ < 0 {
-					typ = 0
-				}
-				if txp >= texW {
-					txp = texW - 1
-				}
-				if typ >= texH {
-					typ = texH - 1
-				}
-				off := typ*texStride + txp*4
-				tR = texPix[off]
-				tG = texPix[off+1]
-				tB = texPix[off+2]
-				tA = texPix[off+3]
+				c := bilinearSampleNormalizedNRGBA(tex, tu, tv)
+				tR = c.R
+				tG = c.G
+				tB = c.B
+				tA = c.A
 			} else {
 				tR, tG, tB, tA = 255, 255, 255, 255
 			}
@@ -1091,96 +1434,156 @@ func fitInBoundingBox(srcW, srcH, maxW, maxH int) (int, int) {
 // It interpolates all four channels (RGBA) in premultiplied-alpha space
 // to produce smooth, correct edges on transparent images.
 func scaleNRGBA(src *image.NRGBA, dstW, dstH int) *image.NRGBA {
+	return scaleImageRectNRGBA(src, src.Bounds(), dstW, dstH)
+}
+
+// scaleImageRectNRGBA rescales a source rectangle from an NRGBA image using
+// the shared bilinear resampler used for all PNG subimages and full-image
+// resizes in the renderer.
+func scaleImageRectNRGBA(src *image.NRGBA, srcRect image.Rectangle, dstW, dstH int) *image.NRGBA {
 	dst := image.NewNRGBA(image.Rect(0, 0, dstW, dstH))
-	srcW := src.Bounds().Dx()
-	srcH := src.Bounds().Dy()
-	if srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0 {
+	if src == nil || dstW <= 0 || dstH <= 0 {
 		return dst
+	}
+	srcRect = srcRect.Intersect(src.Bounds())
+	srcW := srcRect.Dx()
+	srcH := srcRect.Dy()
+	if srcW == 0 || srcH == 0 {
+		return dst
+	}
+
+	dstPix := dst.Pix
+	dstStride := dst.Stride
+
+	for dy := range dstH {
+		sy := mappedSampleCoord(float64(dy)+0.5, 0, float64(dstH), srcRect.Min.Y, srcH)
+		dstRow := dy * dstStride
+
+		for dx := range dstW {
+			dOff := dstRow + dx*4
+			sx := mappedSampleCoord(float64(dx)+0.5, 0, float64(dstW), srcRect.Min.X, srcW)
+			c := bilinearSampleNRGBA(src, srcRect, sx, sy)
+			dstPix[dOff] = c.R
+			dstPix[dOff+1] = c.G
+			dstPix[dOff+2] = c.B
+			dstPix[dOff+3] = c.A
+		}
+	}
+	return dst
+}
+
+// mappedSampleCoord maps a destination pixel center to a source sample
+// coordinate using the shared scaling convention for all bilinearly scaled
+// PNG inputs in the renderer.
+func mappedSampleCoord(dstPixelCenter, dstStart, dstSize float64, srcStart, srcSize int) float64 {
+	if dstSize <= 0 || srcSize <= 0 {
+		return float64(srcStart)
+	}
+	return (dstPixelCenter-dstStart)*(float64(srcSize)/dstSize) - 0.5 + float64(srcStart)
+}
+
+// bilinearSampleNRGBA samples src within srcRect using premultiplied-alpha
+// bilinear interpolation and returns a non-premultiplied NRGBA color.
+func bilinearSampleNRGBA(src *image.NRGBA, srcRect image.Rectangle, fx, fy float64) color.NRGBA {
+	if src == nil || srcRect.Dx() <= 0 || srcRect.Dy() <= 0 {
+		return color.NRGBA{}
+	}
+
+	x0 := int(math.Floor(fx))
+	y0 := int(math.Floor(fy))
+	x1 := x0 + 1
+	y1 := y0 + 1
+	xf := fx - float64(x0)
+	yf := fy - float64(y0)
+	if xf < 0 {
+		xf = 0
+	}
+	if yf < 0 {
+		yf = 0
+	}
+
+	maxSX := srcRect.Max.X - 1
+	maxSY := srcRect.Max.Y - 1
+	if x0 < srcRect.Min.X {
+		x0 = srcRect.Min.X
+	}
+	if x0 > maxSX {
+		x0 = maxSX
+	}
+	if x1 < srcRect.Min.X {
+		x1 = srcRect.Min.X
+	}
+	if x1 > maxSX {
+		x1 = maxSX
+	}
+	if y0 < srcRect.Min.Y {
+		y0 = srcRect.Min.Y
+	}
+	if y0 > maxSY {
+		y0 = maxSY
+	}
+	if y1 < srcRect.Min.Y {
+		y1 = srcRect.Min.Y
+	}
+	if y1 > maxSY {
+		y1 = maxSY
 	}
 
 	srcPix := src.Pix
 	srcStride := src.Stride
-	dstPix := dst.Pix
-	dstStride := dst.Stride
+	off00 := y0*srcStride + x0*4
+	off10 := y0*srcStride + x1*4
+	off01 := y1*srcStride + x0*4
+	off11 := y1*srcStride + x1*4
 
-	xRatio := float64(srcW) / float64(dstW)
-	yRatio := float64(srcH) / float64(dstH)
+	a00, a10 := float64(srcPix[off00+3]), float64(srcPix[off10+3])
+	a01, a11 := float64(srcPix[off01+3]), float64(srcPix[off11+3])
+	pa00, pa10 := a00/255.0, a10/255.0
+	pa01, pa11 := a01/255.0, a11/255.0
 
-	lastSrcX := srcW - 1
-	lastSrcY := srcH - 1
+	ix0 := 1 - xf
+	ix1 := xf
+	iy0 := 1 - yf
+	iy1 := yf
 
-	for dy := range dstH {
-		sy := (float64(dy)+0.5)*yRatio - 0.5
-		sy0 := max(int(sy), 0)
-		sy1 := min(sy0+1, lastSrcY)
-		fy := sy - float64(sy0)
-		if fy < 0 {
-			fy = 0
-		}
-		fy1 := uint32(fy * 256)
-		fy0 := 256 - fy1
-
-		srcRow0 := sy0 * srcStride
-		srcRow1 := sy1 * srcStride
-		dstRow := dy * dstStride
-
-		for dx := range dstW {
-			sx := (float64(dx)+0.5)*xRatio - 0.5
-			sx0 := max(int(sx), 0)
-			sx1 := min(sx0+1, lastSrcX)
-			fx := sx - float64(sx0)
-			if fx < 0 {
-				fx = 0
-			}
-			fx1 := uint32(fx * 256)
-			fx0 := 256 - fx1
-
-			// Four source pixel offsets
-			off00 := srcRow0 + sx0*4
-			off10 := srcRow0 + sx1*4
-			off01 := srcRow1 + sx0*4
-			off11 := srcRow1 + sx1*4
-
-			// Interpolate alpha.
-			a := (uint32(srcPix[off00+3])*fx0*fy0 + uint32(srcPix[off10+3])*fx1*fy0 +
-				uint32(srcPix[off01+3])*fx0*fy1 + uint32(srcPix[off11+3])*fx1*fy1 + 32768) >> 16
-
-			if a == 0 {
-				dOff := dstRow + dx*4
-				dstPix[dOff] = 0
-				dstPix[dOff+1] = 0
-				dstPix[dOff+2] = 0
-				dstPix[dOff+3] = 0
-				continue
-			}
-
-			// Interpolate RGB in premultiplied-alpha space for correct
-			// blending at transparency boundaries.
-			a00 := uint32(srcPix[off00+3])
-			a10 := uint32(srcPix[off10+3])
-			a01 := uint32(srcPix[off01+3])
-			a11 := uint32(srcPix[off11+3])
-
-			pa := a00*fx0*fy0 + a10*fx1*fy0 + a01*fx0*fy1 + a11*fx1*fy1
-			if pa == 0 {
-				pa = 1
-			}
-
-			pr := uint32(srcPix[off00])*a00*fx0*fy0 + uint32(srcPix[off10])*a10*fx1*fy0 +
-				uint32(srcPix[off01])*a01*fx0*fy1 + uint32(srcPix[off11])*a11*fx1*fy1
-			pg := uint32(srcPix[off00+1])*a00*fx0*fy0 + uint32(srcPix[off10+1])*a10*fx1*fy0 +
-				uint32(srcPix[off01+1])*a01*fx0*fy1 + uint32(srcPix[off11+1])*a11*fx1*fy1
-			pb := uint32(srcPix[off00+2])*a00*fx0*fy0 + uint32(srcPix[off10+2])*a10*fx1*fy0 +
-				uint32(srcPix[off01+2])*a01*fx0*fy1 + uint32(srcPix[off11+2])*a11*fx1*fy1
-
-			dOff := dstRow + dx*4
-			dstPix[dOff] = uint8((pr + pa/2) / pa)
-			dstPix[dOff+1] = uint8((pg + pa/2) / pa)
-			dstPix[dOff+2] = uint8((pb + pa/2) / pa)
-			dstPix[dOff+3] = uint8(a)
-		}
+	outA := a00*ix0*iy0 + a10*ix1*iy0 + a01*ix0*iy1 + a11*ix1*iy1
+	if outA < 0.5 {
+		return color.NRGBA{}
 	}
-	return dst
+
+	pr := float64(srcPix[off00+0])*pa00*ix0*iy0 + float64(srcPix[off10+0])*pa10*ix1*iy0 +
+		float64(srcPix[off01+0])*pa01*ix0*iy1 + float64(srcPix[off11+0])*pa11*ix1*iy1
+	pg := float64(srcPix[off00+1])*pa00*ix0*iy0 + float64(srcPix[off10+1])*pa10*ix1*iy0 +
+		float64(srcPix[off01+1])*pa01*ix0*iy1 + float64(srcPix[off11+1])*pa11*ix1*iy1
+	pb := float64(srcPix[off00+2])*pa00*ix0*iy0 + float64(srcPix[off10+2])*pa10*ix1*iy0 +
+		float64(srcPix[off01+2])*pa01*ix0*iy1 + float64(srcPix[off11+2])*pa11*ix1*iy1
+
+	aOut := outA / 255.0
+	var r, g, b float64
+	if aOut > 0 {
+		r = pr / aOut
+		g = pg / aOut
+		b = pb / aOut
+	}
+
+	return color.NRGBA{
+		R: uint8(clampF64(r)),
+		G: uint8(clampF64(g)),
+		B: uint8(clampF64(b)),
+		A: uint8(clampF64(outA)),
+	}
+}
+
+// bilinearSampleNormalizedNRGBA samples an entire NRGBA texture using
+// normalized texture coordinates.
+func bilinearSampleNormalizedNRGBA(src *image.NRGBA, u, v float64) color.NRGBA {
+	if src == nil {
+		return color.NRGBA{}
+	}
+	b := src.Bounds()
+	fx := u*float64(b.Dx()) - 0.5 + float64(b.Min.X)
+	fy := v*float64(b.Dy()) - 0.5 + float64(b.Min.Y)
+	return bilinearSampleNRGBA(src, b, fx, fy)
 }
 
 // fillCheckerboard paints the DDNet editor checkerboard background onto canvas.
@@ -1287,6 +1690,23 @@ var entityInfo = map[uint8]entityRenderInfo{
 		sprite:     gameSkinSprite{x: 2, y: 12, w: 7, h: 3},
 		widthTiles: 2.64, heightTiles: 1.13,
 	},
+	// Weapon-removal pickups (DDNet entities).
+	TileEntityArmorShotgun: {
+		sprite:     gameSkinSprite{x: 15, y: 2, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
+	TileEntityArmorGrenade: {
+		sprite:     gameSkinSprite{x: 17, y: 2, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
+	TileEntityArmorNinja: {
+		sprite:     gameSkinSprite{x: 10, y: 10, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
+	TileEntityArmorLaser: {
+		sprite:     gameSkinSprite{x: 19, y: 2, w: 2, h: 2},
+		widthTiles: 1.414, heightTiles: 1.414,
+	},
 	// Flag blue: hardcoded 42×84 GU → 1.31×2.63 tiles, drawn at y - 42*0.75 = -0.98 tiles
 	TileFlagstandBlue: {
 		sprite:     gameSkinSprite{x: 12, y: 8, w: 4, h: 8},
@@ -1309,14 +1729,18 @@ type entityFallbackStyle struct {
 }
 
 var entityFallback = map[uint8]entityFallbackStyle{
-	TileFlagstandRed:  {fill: color.NRGBA{R: 255, G: 40, B: 40, A: 220}, outline: color.NRGBA{R: 180, G: 0, B: 0, A: 255}},
-	TileFlagstandBlue: {fill: color.NRGBA{R: 40, G: 40, B: 255, A: 220}, outline: color.NRGBA{R: 0, G: 0, B: 180, A: 255}},
-	TileHealth:        {fill: color.NRGBA{R: 255, G: 50, B: 50, A: 220}, outline: color.NRGBA{R: 200, G: 0, B: 0, A: 255}},
-	TileArmor:         {fill: color.NRGBA{R: 60, G: 200, B: 60, A: 220}, outline: color.NRGBA{R: 0, G: 150, B: 0, A: 255}},
-	TileWeaponShotgun: {fill: color.NRGBA{R: 200, G: 150, B: 50, A: 220}, outline: color.NRGBA{R: 160, G: 110, B: 0, A: 255}},
-	TileWeaponGrenade: {fill: color.NRGBA{R: 80, G: 180, B: 80, A: 220}, outline: color.NRGBA{R: 40, G: 140, B: 40, A: 255}},
-	TilePowerupNinja:  {fill: color.NRGBA{R: 160, G: 80, B: 200, A: 220}, outline: color.NRGBA{R: 120, G: 40, B: 160, A: 255}},
-	TileWeaponLaser:   {fill: color.NRGBA{R: 50, G: 180, B: 220, A: 220}, outline: color.NRGBA{R: 0, G: 140, B: 180, A: 255}},
+	TileFlagstandRed:       {fill: color.NRGBA{R: 255, G: 40, B: 40, A: 220}, outline: color.NRGBA{R: 180, G: 0, B: 0, A: 255}},
+	TileFlagstandBlue:      {fill: color.NRGBA{R: 40, G: 40, B: 255, A: 220}, outline: color.NRGBA{R: 0, G: 0, B: 180, A: 255}},
+	TileHealth:             {fill: color.NRGBA{R: 255, G: 50, B: 50, A: 220}, outline: color.NRGBA{R: 200, G: 0, B: 0, A: 255}},
+	TileArmor:              {fill: color.NRGBA{R: 60, G: 200, B: 60, A: 220}, outline: color.NRGBA{R: 0, G: 150, B: 0, A: 255}},
+	TileWeaponShotgun:      {fill: color.NRGBA{R: 200, G: 150, B: 50, A: 220}, outline: color.NRGBA{R: 160, G: 110, B: 0, A: 255}},
+	TileWeaponGrenade:      {fill: color.NRGBA{R: 80, G: 180, B: 80, A: 220}, outline: color.NRGBA{R: 40, G: 140, B: 40, A: 255}},
+	TilePowerupNinja:       {fill: color.NRGBA{R: 160, G: 80, B: 200, A: 220}, outline: color.NRGBA{R: 120, G: 40, B: 160, A: 255}},
+	TileWeaponLaser:        {fill: color.NRGBA{R: 50, G: 180, B: 220, A: 220}, outline: color.NRGBA{R: 0, G: 140, B: 180, A: 255}},
+	TileEntityArmorShotgun: {fill: color.NRGBA{R: 200, G: 150, B: 50, A: 220}, outline: color.NRGBA{R: 160, G: 110, B: 0, A: 255}},
+	TileEntityArmorGrenade: {fill: color.NRGBA{R: 80, G: 180, B: 80, A: 220}, outline: color.NRGBA{R: 40, G: 140, B: 40, A: 255}},
+	TileEntityArmorNinja:   {fill: color.NRGBA{R: 160, G: 80, B: 200, A: 220}, outline: color.NRGBA{R: 120, G: 40, B: 160, A: 255}},
+	TileEntityArmorLaser:   {fill: color.NRGBA{R: 50, G: 180, B: 220, A: 220}, outline: color.NRGBA{R: 0, G: 140, B: 180, A: 255}},
 }
 
 // renderEntities draws entity icons (pickups, flags) from the game layer
@@ -1326,11 +1750,17 @@ var entityFallback = map[uint8]entityFallbackStyle{
 //
 // Spawns are intentionally excluded — they have no runtime sprite in DDNet
 // and are only visible through the game layer overlay ([WithGameLayer]).
-func renderEntities(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32) {
+func renderEntities(canvas *image.NRGBA, m *Map, ro *renderOptions, crop *MapBounds, tileLen uint32) {
 	skin := resolveGameSkin()
-	tl := int(tileLen)
-	for _, g := range m.Groups {
-		for _, l := range g.Layers {
+	tl := float64(tileLen)
+	for i := range m.Groups {
+		g := &m.Groups[i]
+		tileOffX, tileOffY, _, _, ok := computeGroupRenderOffsets(g, ro)
+		if !ok {
+			continue
+		}
+		for j := range g.Layers {
+			l := &g.Layers[j]
 			if l.Kind != LayerKindGame {
 				continue
 			}
@@ -1341,22 +1771,22 @@ func renderEntities(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32
 					continue
 				}
 
-				tx := i % l.Width
-				ty := i / l.Width
+				tx := float64(i%l.Width) + tileOffX
+				ty := float64(i/l.Width) + tileOffY
 				// Center of the entity tile in canvas pixels.
-				centerX := float64(tx-crop.MinX)*float64(tl) + float64(tl)/2.0
-				centerY := float64(ty-crop.MinY)*float64(tl) + float64(tl)/2.0
+				centerX := (tx-float64(crop.MinX))*tl + tl/2.0
+				centerY := (ty-float64(crop.MinY))*tl + tl/2.0
 
 				if skin != nil && hasSprite {
-					dstW := info.widthTiles * float64(tl)
-					dstH := info.heightTiles * float64(tl)
-					offY := info.offsetYTiles * float64(tl)
+					dstW := info.widthTiles * tl
+					dstH := info.heightTiles * tl
+					offY := info.offsetYTiles * tl
 					blitSpriteRect(canvas, skin, info.sprite.bounds(),
 						centerX-dstW/2, centerY-dstH/2+offY, dstW, dstH)
 				} else if hasFallback {
-					cx := (tx - crop.MinX) * tl
-					cy := (ty - crop.MinY) * tl
-					drawEntityCircle(canvas, cx, cy, tl, fallback)
+					cx := int(math.Round((tx - float64(crop.MinX)) * tl))
+					cy := int(math.Round((ty - float64(crop.MinY)) * tl))
+					drawEntityCircle(canvas, cx, cy, int(tileLen), fallback)
 				}
 			}
 		}
@@ -1365,7 +1795,7 @@ func renderEntities(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32
 
 // blitSpriteRect draws the srcRect region of src onto canvas at the given
 // destination rectangle (dstX, dstY, dstW, dstH) in canvas pixel coordinates.
-// Uses bilinear interpolation for smooth edges.
+// It uses the same shared bilinear resampler as scaleNRGBA.
 func blitSpriteRect(canvas *image.NRGBA, src *image.NRGBA, srcRect image.Rectangle,
 	dstX, dstY, dstW, dstH float64) {
 
@@ -1395,93 +1825,13 @@ func blitSpriteRect(canvas *image.NRGBA, src *image.NRGBA, srcRect image.Rectang
 		endDY = bounds.Max.Y
 	}
 
-	srcPix := src.Pix
-	srcStride := src.Stride
-	maxSX := srcRect.Max.X - 1
-	maxSY := srcRect.Max.Y - 1
-
 	for py := startDY; py < endDY; py++ {
-		fy := (float64(py)+0.5-dstY)/dstH*sh - 0.5 + float64(srcRect.Min.Y)
+		fy := mappedSampleCoord(float64(py)+0.5, dstY, dstH, srcRect.Min.Y, int(sh))
 		for px := startDX; px < endDX; px++ {
-			fx := (float64(px)+0.5-dstX)/dstW*sw - 0.5 + float64(srcRect.Min.X)
-
-			// Bilinear sample coordinates.
-			x0 := int(math.Floor(fx))
-			y0 := int(math.Floor(fy))
-			x1 := x0 + 1
-			y1 := y0 + 1
-			xf := fx - float64(x0)
-			yf := fy - float64(y0)
-
-			// Clamp to srcRect bounds.
-			if x0 < srcRect.Min.X {
-				x0 = srcRect.Min.X
-			}
-			if x0 > maxSX {
-				x0 = maxSX
-			}
-			if x1 < srcRect.Min.X {
-				x1 = srcRect.Min.X
-			}
-			if x1 > maxSX {
-				x1 = maxSX
-			}
-			if y0 < srcRect.Min.Y {
-				y0 = srcRect.Min.Y
-			}
-			if y0 > maxSY {
-				y0 = maxSY
-			}
-			if y1 < srcRect.Min.Y {
-				y1 = srcRect.Min.Y
-			}
-			if y1 > maxSY {
-				y1 = maxSY
-			}
-
-			// Four texel corners.
-			off00 := y0*srcStride + x0*4
-			off10 := y0*srcStride + x1*4
-			off01 := y1*srcStride + x0*4
-			off11 := y1*srcStride + x1*4
-
-			// Interpolate in premultiplied-alpha space for correct blending.
-			a00, a10 := float64(srcPix[off00+3]), float64(srcPix[off10+3])
-			a01, a11 := float64(srcPix[off01+3]), float64(srcPix[off11+3])
-			pa00, pa10 := a00/255.0, a10/255.0
-			pa01, pa11 := a01/255.0, a11/255.0
-
-			ix0 := 1 - xf
-			ix1 := xf
-			iy0 := 1 - yf
-			iy1 := yf
-
-			outA := a00*ix0*iy0 + a10*ix1*iy0 + a01*ix0*iy1 + a11*ix1*iy1
-			if outA < 0.5 {
+			fx := mappedSampleCoord(float64(px)+0.5, dstX, dstW, srcRect.Min.X, int(sw))
+			c := bilinearSampleNRGBA(src, srcRect, fx, fy)
+			if c.A == 0 {
 				continue
-			}
-
-			pr := float64(srcPix[off00+0])*pa00*ix0*iy0 + float64(srcPix[off10+0])*pa10*ix1*iy0 +
-				float64(srcPix[off01+0])*pa01*ix0*iy1 + float64(srcPix[off11+0])*pa11*ix1*iy1
-			pg := float64(srcPix[off00+1])*pa00*ix0*iy0 + float64(srcPix[off10+1])*pa10*ix1*iy0 +
-				float64(srcPix[off01+1])*pa01*ix0*iy1 + float64(srcPix[off11+1])*pa11*ix1*iy1
-			pb := float64(srcPix[off00+2])*pa00*ix0*iy0 + float64(srcPix[off10+2])*pa10*ix1*iy0 +
-				float64(srcPix[off01+2])*pa01*ix0*iy1 + float64(srcPix[off11+2])*pa11*ix1*iy1
-
-			// Convert back to non-premultiplied.
-			aOut := outA / 255.0
-			var r, g, b float64
-			if aOut > 0 {
-				r = pr / aOut
-				g = pg / aOut
-				b = pb / aOut
-			}
-
-			c := color.NRGBA{
-				R: uint8(clampF64(r)),
-				G: uint8(clampF64(g)),
-				B: uint8(clampF64(b)),
-				A: uint8(clampF64(outA)),
 			}
 			alphaBlendPixel(canvas, px, py, c)
 		}
@@ -1521,44 +1871,353 @@ func drawEntityCircle(canvas *image.NRGBA, cx, cy, tl int, style entityFallbackS
 	}
 }
 
-// ── Game layer overlay ───────────────────────────────────────────────────────
+// ── DDNet physics overlays ──────────────────────────────────────────────────
 
-// renderGameLayer renders the game layer tiles using the "entities" tileset
-// image, making invisible tiles (solid, hookable, freeze, spawns, etc.)
-// visible as a semi-transparent overlay. This matches the DDNet editor's
-// entity overlay / cl_overlay_entities behaviour.
-func renderGameLayer(canvas *image.NRGBA, m *Map, crop *MapBounds, tileLen uint32) {
-	entImg := resolveExternalImage("entities")
-	if entImg == nil {
+// renderOverlayLayers renders pre-collected DDNet physics/entity tile layers
+// using the dedicated DDNet entity-layer sheet.
+func renderOverlayLayers(canvas *image.NRGBA, layers []overlayRenderLayer, crop *MapBounds, tileLen uint32) {
+	if len(layers) == 0 {
+		return
+	}
+	entImg := resolveEntitiesImage()
+	var tilesets map[int]*image.NRGBA
+	if entImg != nil {
+		tilesets = map[int]*image.NRGBA{
+			0: scaleTileset(entImg, int(tileLen)),
+		}
+	}
+	for i := range layers {
+		switch layers[i].kind {
+		case LayerKindSpeedup:
+			renderSpeedupLayer(canvas, &layers[i], crop, tileLen)
+		default:
+			if len(tilesets) != 0 {
+				renderSingleTileLayer(canvas, &layers[i].layer, tilesets, crop, tileLen)
+			}
+		}
+		renderOverlayLayerText(canvas, &layers[i], crop, tileLen)
+	}
+}
+
+func renderSpeedupLayer(canvas *image.NRGBA, layer *overlayRenderLayer, crop *MapBounds, tileLen uint32) {
+	if layer == nil || len(layer.speedupTiles) == 0 || layer.layer.width <= 0 {
+		return
+	}
+	tilePx := float64(tileLen)
+	for idx, speed := range layer.speedupTiles {
+		if (speed.Force == 0 && speed.ID == TileSpeedBoostOld) ||
+			(speed.Force == 0 && speed.MaxSpeed == 0 && speed.ID == TileSpeedBoost) ||
+			!IsValidSpeedupTile(speed.ID) {
+			continue
+		}
+		tx := float64(idx%layer.layer.width) + layer.layer.offsetX
+		ty := float64(idx/layer.layer.width) + layer.layer.offsetY
+		centerX := (tx - float64(crop.MinX) + 0.5) * tilePx
+		centerY := (ty - float64(crop.MinY) + 0.5) * tilePx
+		renderSpeedupArrow(canvas, centerX, centerY, tilePx, float64(speed.Angle), layer.layer.color)
+	}
+}
+
+func renderSpeedupArrow(canvas *image.NRGBA, centerX, centerY, tilePx, angleDeg float64, c color.NRGBA) {
+	shaft := [4][2]float64{{-0.10, -0.18}, {0.10, -0.18}, {0.10, 0.12}, {-0.10, 0.12}}
+	head := [3][2]float64{{-0.28, 0.10}, {0.28, 0.10}, {0.00, 0.36}}
+	for i := range shaft {
+		shaft[i][0], shaft[i][1] = rotateAroundOrigin(shaft[i][0], shaft[i][1], angleDeg)
+		shaft[i][0] = centerX + shaft[i][0]*tilePx
+		shaft[i][1] = centerY + shaft[i][1]*tilePx
+	}
+	for i := range head {
+		head[i][0], head[i][1] = rotateAroundOrigin(head[i][0], head[i][1], angleDeg)
+		head[i][0] = centerX + head[i][0]*tilePx
+		head[i][1] = centerY + head[i][1]*tilePx
+	}
+	rasterizeTriangle(canvas, nil,
+		shaft[0][0], shaft[0][1], 0, 0, c,
+		shaft[1][0], shaft[1][1], 0, 0, c,
+		shaft[2][0], shaft[2][1], 0, 0, c,
+	)
+	rasterizeTriangle(canvas, nil,
+		shaft[0][0], shaft[0][1], 0, 0, c,
+		shaft[2][0], shaft[2][1], 0, 0, c,
+		shaft[3][0], shaft[3][1], 0, 0, c,
+	)
+	rasterizeTriangle(canvas, nil,
+		head[0][0], head[0][1], 0, 0, c,
+		head[1][0], head[1][1], 0, 0, c,
+		head[2][0], head[2][1], 0, 0, c,
+	)
+}
+
+func rotateAroundOrigin(x, y, angleDeg float64) (float64, float64) {
+	rad := angleDeg * math.Pi / 180.0
+	sinA := math.Sin(rad)
+	cosA := math.Cos(rad)
+	return x*cosA - y*sinA, x*sinA + y*cosA
+}
+
+const (
+	bitmapTextGlyphWidth   = 3
+	bitmapTextGlyphHeight  = 5
+	bitmapTextGlyphSpacing = 1
+	minOverlayTextTileLen  = 12
+)
+
+var bitmapDigitFont = map[rune][bitmapTextGlyphHeight]string{
+	'0': {"111", "101", "101", "101", "111"},
+	'1': {"010", "110", "010", "010", "111"},
+	'2': {"111", "001", "111", "100", "111"},
+	'3': {"111", "001", "111", "001", "111"},
+	'4': {"101", "101", "111", "001", "001"},
+	'5': {"111", "100", "111", "001", "111"},
+	'6': {"111", "100", "111", "101", "111"},
+	'7': {"111", "001", "010", "010", "010"},
+	'8': {"111", "101", "111", "101", "111"},
+	'9': {"111", "101", "111", "001", "111"},
+	'-': {"000", "000", "111", "000", "000"},
+}
+
+func renderOverlayLayerText(canvas *image.NRGBA, layer *overlayRenderLayer, crop *MapBounds, tileLen uint32) {
+	if layer == nil || tileLen < minOverlayTextTileLen || layer.layer.width <= 0 {
 		return
 	}
 
-	tl := int(tileLen)
-	// The entities.png is a 16×16 tileset grid.
-	scaledEnt := scaleTileset(entImg, tl)
+	tilePx := float64(tileLen)
+	textColor := color.NRGBA{R: 255, G: 255, B: 255, A: layer.layer.color.A}
+	if textColor.A == 0 {
+		textColor.A = 255
+	}
 
-	for _, g := range m.Groups {
-		for _, l := range g.Layers {
-			if l.Kind != LayerKindGame {
+	switch layer.kind {
+	case LayerKindTele:
+		for idx, tile := range layer.teleTiles {
+			if tile.Number == 0 || !IsValidTeleTile(tile.ID) || !IsTeleTileNumberUsedAny(tile.ID) {
 				continue
 			}
-			for i, t := range l.Tiles {
-				if t.ID == TileAir {
+			left, top := overlayTileCanvasOrigin(layer, idx, crop, tilePx)
+			drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.Number)), left+tilePx*0.04, top+tilePx*0.08, tilePx*0.92, tilePx*0.72, textColor)
+		}
+	case LayerKindSwitch:
+		for idx, tile := range layer.switchTiles {
+			if !IsValidSwitchTile(tile.ID) {
+				continue
+			}
+			left, top := overlayTileCanvasOrigin(layer, idx, crop, tilePx)
+			if tile.Number > 0 && IsSwitchTileNumberUsed(tile.ID) {
+				drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.Number)), left+tilePx*0.04, top+tilePx*0.04, tilePx*0.92, tilePx*0.34, textColor)
+			}
+			if tile.Delay > 0 && IsSwitchTileDelayUsed(tile.ID) {
+				drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.Delay)), left+tilePx*0.04, top+tilePx*0.50, tilePx*0.92, tilePx*0.34, textColor)
+			}
+		}
+	case LayerKindTune:
+		for idx, tile := range layer.tuneTiles {
+			if tile.Number == 0 || !IsValidTuneTile(tile.ID) {
+				continue
+			}
+			left, top := overlayTileCanvasOrigin(layer, idx, crop, tilePx)
+			drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.Number)), left+tilePx*0.04, top+tilePx*0.08, tilePx*0.92, tilePx*0.72, textColor)
+		}
+	case LayerKindSpeedup:
+		for idx, tile := range layer.speedupTiles {
+			if (tile.Force == 0 && tile.ID == TileSpeedBoostOld) ||
+				(tile.Force == 0 && tile.MaxSpeed == 0 && tile.ID == TileSpeedBoost) ||
+				!IsValidSpeedupTile(tile.ID) {
+				continue
+			}
+			left, top := overlayTileCanvasOrigin(layer, idx, crop, tilePx)
+			if tile.MaxSpeed > 0 {
+				drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.MaxSpeed)), left+tilePx*0.04, top+tilePx*0.04, tilePx*0.92, tilePx*0.28, textColor)
+			}
+			if tile.Force > 0 {
+				drawBitmapTextInBox(canvas, strconv.Itoa(int(tile.Force)), left+tilePx*0.04, top+tilePx*0.52, tilePx*0.92, tilePx*0.28, textColor)
+			}
+		}
+	}
+}
+
+func overlayTileCanvasOrigin(layer *overlayRenderLayer, idx int, crop *MapBounds, tilePx float64) (float64, float64) {
+	tx := float64(idx%layer.layer.width) + layer.layer.offsetX
+	ty := float64(idx/layer.layer.width) + layer.layer.offsetY
+	left := (tx - float64(crop.MinX)) * tilePx
+	top := (ty - float64(crop.MinY)) * tilePx
+	return left, top
+}
+
+func drawBitmapTextInBox(canvas *image.NRGBA, text string, boxX, boxY, boxW, boxH float64, c color.NRGBA) {
+	if text == "" || boxW <= 0 || boxH <= 0 {
+		return
+	}
+	textW, textH := bitmapTextSize(text)
+	if textW == 0 || textH == 0 {
+		return
+	}
+	scale := math.Min(boxW/float64(textW), boxH/float64(textH))
+	if scale < 1.0 {
+		return
+	}
+	renderW := float64(textW) * scale
+	renderH := float64(textH) * scale
+	x := boxX + (boxW-renderW)/2.0
+	y := boxY + (boxH-renderH)/2.0
+	shadowOffset := math.Max(1.0, scale*0.18)
+	renderBitmapText(canvas, text, x+shadowOffset, y+shadowOffset, scale, color.NRGBA{A: c.A})
+	renderBitmapText(canvas, text, x, y, scale, c)
+}
+
+func bitmapTextSize(text string) (int, int) {
+	if text == "" {
+		return 0, 0
+	}
+	width := 0
+	count := 0
+	for _, ch := range text {
+		if _, ok := bitmapDigitFont[ch]; !ok {
+			continue
+		}
+		if count > 0 {
+			width += bitmapTextGlyphSpacing
+		}
+		width += bitmapTextGlyphWidth
+		count++
+	}
+	if count == 0 {
+		return 0, 0
+	}
+	return width, bitmapTextGlyphHeight
+}
+
+func renderBitmapText(canvas *image.NRGBA, text string, x, y, scale float64, c color.NRGBA) {
+	if scale <= 0 || c.A == 0 {
+		return
+	}
+	cursorX := x
+	for _, ch := range text {
+		glyph, ok := bitmapDigitFont[ch]
+		if !ok {
+			continue
+		}
+		for gy := 0; gy < bitmapTextGlyphHeight; gy++ {
+			for gx := 0; gx < bitmapTextGlyphWidth; gx++ {
+				if glyph[gy][gx] != '1' {
 					continue
 				}
-				tx := i % l.Width
-				ty := i / l.Width
-				cx := (tx - crop.MinX) * tl
-				cy := (ty - crop.MinY) * tl
+				fillRectNRGBA(canvas, cursorX+float64(gx)*scale, y+float64(gy)*scale, scale, scale, c)
+			}
+		}
+		cursorX += float64(bitmapTextGlyphWidth+bitmapTextGlyphSpacing) * scale
+	}
+}
 
-				// Tile index in 16×16 grid.
-				tileX := int(t.ID) % tilesetGridSize
-				tileY := int(t.ID) / tilesetGridSize
-				srcX := tileX * tl
-				srcY := tileY * tl
+func fillRectNRGBA(canvas *image.NRGBA, x, y, w, h float64, c color.NRGBA) {
+	if w <= 0 || h <= 0 || c.A == 0 {
+		return
+	}
+	bounds := canvas.Bounds()
+	startX := max(int(math.Floor(x)), bounds.Min.X)
+	startY := max(int(math.Floor(y)), bounds.Min.Y)
+	endX := min(int(math.Ceil(x+w)), bounds.Max.X)
+	endY := min(int(math.Ceil(y+h)), bounds.Max.Y)
+	if startX >= endX || startY >= endY {
+		return
+	}
+	for py := startY; py < endY; py++ {
+		for px := startX; px < endX; px++ {
+			alphaBlendPixel(canvas, px, py, c)
+		}
+	}
+}
 
-				srcRect := image.Rect(srcX, srcY, srcX+tl, srcY+tl)
-				blitTileAlpha(canvas, scaledEnt, srcRect, cx, cy, tl, 180)
+// ── Particle markers ────────────────────────────────────────────────────────
+
+type particleSprite struct {
+	x, y, w, h int
+}
+
+func (s particleSprite) bounds() image.Rectangle {
+	return image.Rect(s.x, s.y, s.x+s.w, s.y+s.h)
+}
+
+var particleSprites = map[string]particleSprite{
+	"slice":   {x: 0, y: 0, w: 64, h: 64},
+	"ball":    {x: 64, y: 0, w: 64, h: 64},
+	"splat0":  {x: 128, y: 0, w: 64, h: 64},
+	"splat1":  {x: 192, y: 0, w: 64, h: 64},
+	"splat2":  {x: 256, y: 0, w: 64, h: 64},
+	"smoke":   {x: 0, y: 64, w: 64, h: 64},
+	"expl":    {x: 128, y: 64, w: 128, h: 128},
+	"airjump": {x: 320, y: 64, w: 64, h: 64},
+	"spiral":  {x: 0, y: 128, w: 128, h: 128},
+	"spark":   {x: 128, y: 128, w: 128, h: 128},
+}
+
+func particleSpriteForTile(id uint8) (particleSprite, bool) {
+	switch id {
+	case TileUnlimitedJumpsOn:
+		return particleSprites["airjump"], true
+	case TileUnlimitedJumpsOff:
+		return particleSprites["splat0"], true
+	case TileJetpackOn:
+		return particleSprites["smoke"], true
+	case TileJetpackOff:
+		return particleSprites["slice"], true
+	case TileTeleGunEnable:
+		return particleSprites["ball"], true
+	case TileTeleGunDisable:
+		return particleSprites["splat1"], true
+	case TileTeleGrenadeEnable, TileTeleLaserEnable:
+		return particleSprites["expl"], true
+	case TileTeleGrenadeDisable, TileTeleLaserDisable:
+		return particleSprites["splat2"], true
+	case TileEHookEnable:
+		return particleSprites["spiral"], true
+	case TileEHookDisable:
+		return particleSprites["slice"], true
+	case TileHitEnable, TileNPHEnable, TileAllowTeleGun, TileAllowBlueTeleGun:
+		return particleSprites["spark"], true
+	case TileHitDisable, TileNPHDisable:
+		return particleSprites["splat0"], true
+	default:
+		return particleSprite{}, false
+	}
+}
+
+// renderParticles draws a non-animated particle marker pass on top of game/front
+// tiles for selected DDNet capability/controller tiles.
+func renderParticles(canvas *image.NRGBA, m *Map, ro *renderOptions, crop *MapBounds, tileLen uint32) {
+	particles := resolveParticleImage()
+	if particles == nil {
+		return
+	}
+
+	tilePx := float64(tileLen)
+	includeDetail := ro != nil && ro.detail
+
+	for i := range m.Groups {
+		g := &m.Groups[i]
+		tileOffX, tileOffY, _, _, ok := computeGroupRenderOffsets(g, ro)
+		if !ok {
+			continue
+		}
+
+		for j := range g.Layers {
+			l := &g.Layers[j]
+			if l.Detail && !includeDetail {
+				continue
+			}
+			if l.Kind != LayerKindGame && l.Kind != LayerKindFront {
+				continue
+			}
+			for idx, t := range l.Tiles {
+				spr, ok := particleSpriteForTile(t.ID)
+				if !ok {
+					continue
+				}
+				tx := float64(idx%l.Width) + tileOffX
+				ty := float64(idx/l.Width) + tileOffY
+				centerX := (tx - float64(crop.MinX) + 0.5) * tilePx
+				centerY := (ty - float64(crop.MinY) + 0.5) * tilePx
+				size := tilePx * 0.9
+				blitSpriteRect(canvas, particles, spr.bounds(), centerX-size/2.0, centerY-size/2.0, size, size)
 			}
 		}
 	}
@@ -1572,49 +2231,6 @@ func scaleTileset(img *image.NRGBA, tl int) *image.NRGBA {
 		return img
 	}
 	return scaleNRGBA(img, targetW, targetH)
-}
-
-// blitTileAlpha copies pixels from srcRect of src to (cx, cy) on canvas,
-// applying a fixed alpha ceiling to keep the overlay semi-transparent.
-func blitTileAlpha(canvas *image.NRGBA, src *image.NRGBA, srcRect image.Rectangle,
-	cx, cy, tl int, alpha uint8) {
-
-	bounds := canvas.Bounds()
-	for dy := 0; dy < tl; dy++ {
-		py := cy + dy
-		if py < bounds.Min.Y || py >= bounds.Max.Y {
-			continue
-		}
-		srcY := srcRect.Min.Y + dy
-		if srcY >= srcRect.Max.Y {
-			continue
-		}
-		for dx := 0; dx < tl; dx++ {
-			px := cx + dx
-			if px < bounds.Min.X || px >= bounds.Max.X {
-				continue
-			}
-			srcX := srcRect.Min.X + dx
-			if srcX >= srcRect.Max.X {
-				continue
-			}
-			sOff := src.PixOffset(srcX, srcY)
-			sa := src.Pix[sOff+3]
-			if sa == 0 {
-				continue
-			}
-			if sa > alpha {
-				sa = alpha
-			}
-			c := color.NRGBA{
-				R: src.Pix[sOff],
-				G: src.Pix[sOff+1],
-				B: src.Pix[sOff+2],
-				A: sa,
-			}
-			alphaBlendPixel(canvas, px, py, c)
-		}
-	}
 }
 
 // alphaBlendPixel composites color c over the existing pixel at (x, y)

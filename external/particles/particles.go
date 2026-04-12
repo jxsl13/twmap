@@ -5,9 +5,8 @@
 //
 // The package embeds particles.png from the DDNet data directory and
 // registers it with [twmap.RegisterParticleImage] during init().
-// When registered, the [twmap.WithEntities] render option will draw
-// entity icons using sprite data from this image. Without this import,
-// entity rendering is silently skipped.
+// When registered, the [twmap.WithParticles] render option can draw
+// static particle/capability markers from this image.
 package particles
 
 import (

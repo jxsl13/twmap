@@ -7,7 +7,7 @@ import (
 )
 
 // imageRegistry is a concurrency-safe registry for named NRGBA images.
-// Used for tileset images, particle images, and any future named image sets.
+// Used for tileset images and any future named image sets.
 type imageRegistry struct {
 	mu     sync.RWMutex
 	images map[string]*image.NRGBA
@@ -82,7 +82,7 @@ func resolveExternalImage07(name string) *image.NRGBA {
 
 // particleImage holds the registered particle sprite sheet.
 // There is a single active particle image; registering a new one replaces the old.
-var particleImage *image.NRGBA //nolint: unused // will be read when particle rendering is implemented
+var particleImage *image.NRGBA
 
 // particleMu guards particleImage for concurrent access.
 var particleMu sync.RWMutex
@@ -96,6 +96,41 @@ func RegisterParticleImage(img *image.NRGBA) {
 	particleMu.Lock()
 	particleImage = img
 	particleMu.Unlock()
+}
+
+// resolveParticleImage returns the currently registered particle sprite sheet, or nil.
+func resolveParticleImage() *image.NRGBA {
+	particleMu.RLock()
+	img := particleImage
+	particleMu.RUnlock()
+	return img
+}
+
+// entitiesImage holds the registered DDNet entity-layer sprite sheet
+// (entities.png). There is a single active entities image; registering a new
+// one replaces the old.
+var entitiesImage *image.NRGBA
+
+// entitiesMu guards entitiesImage for concurrent access.
+var entitiesMu sync.RWMutex
+
+// RegisterEntitiesImage registers a DDNet entity-layer sprite sheet image.
+// There is a single active entities image; calling this function replaces
+// any previously registered one. The default is provided by importing:
+//
+//	import _ "github.com/jxsl13/twmap/external/entities"
+func RegisterEntitiesImage(img *image.NRGBA) {
+	entitiesMu.Lock()
+	entitiesImage = img
+	entitiesMu.Unlock()
+}
+
+// resolveEntitiesImage returns the currently registered entity-layer sprite sheet, or nil.
+func resolveEntitiesImage() *image.NRGBA {
+	entitiesMu.RLock()
+	img := entitiesImage
+	entitiesMu.RUnlock()
+	return img
 }
 
 // gameSkinImage holds the registered game skin image (default: "game").
@@ -130,7 +165,8 @@ func resolveGameSkin() *image.NRGBA {
 // ToNRGBA converts any [image.Image] to [*image.NRGBA].
 // If the source is already *image.NRGBA it is returned as-is.
 // This is a convenience helper for preparing images before passing them
-// to [RegisterExternalImage], [RegisterGameSkin], or [RegisterParticleImage].
+// to [RegisterExternalImage], [RegisterEntitiesImage], [RegisterGameSkin],
+// or [RegisterParticleImage].
 func ToNRGBA(src image.Image) *image.NRGBA {
 	if nrgba, ok := src.(*image.NRGBA); ok {
 		return nrgba
