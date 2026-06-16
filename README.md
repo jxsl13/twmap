@@ -32,15 +32,17 @@ suitable for inspection, modification, writing, validation, or rendering.
 - **Entity-layer sprites** — optional `external/entities` sub-package embeds
   DDNet's `entities.png` overlay sheet for rendering game/front/tele/
   speedup/switch/tune layers.
+- **Speedup arrow sprite** — optional `external/speeduparrow` sub-package
+  embeds DDNet's `speed_arrow.png` for the speedup-layer arrow rendering path.
 - **Game skin sprites** — optional `external/gameskin` sub-package embeds
   the DDNet game.png sprite sheet for rendering pickups, flags, and spawns
   with actual game sprites via `WithEntities(true)`. Override with your own
   skin via `RegisterGameSkin`.
 - **Particle sprites** — optional `external/particles` sub-package embeds
   the DDNet particles.png sprite sheet.
-- **RegisterExternalImage / RegisterEntitiesImage / RegisterGameSkin** — public
-  APIs for registering custom tilesets, entity overlay sheets, and game skins
-  from your own packages.
+- **RegisterExternalImage / RegisterEntitiesImage / RegisterSpeedupArrowImage / RegisterGameSkin** — public
+  APIs for registering custom tilesets, entity overlay sheets, speedup-arrow assets,
+  and game skins from your own packages.
 - **Game-layer tile IDs** — exported constants for all DDNet game-layer
   tile types (`TileAir`, `TileSolid`, `TileFreeze`, …) and helper
   functions (`IsSolid`, `IsPassable`).
@@ -110,6 +112,41 @@ func main() {
 
 - `(*Map).Write(w io.Writer) error` — Serialise the map into the Teeworlds datafile (v4) format, written to `w`.
 
+### Building maps from scratch
+
+Thin constructors and fluent helpers assemble a `Map` with correct defaults
+(reference ids set to the `-1` "none" sentinel, opaque-white tile color,
+parallax 100/100, pre-sized air-filled tile slices). There is no parallel
+builder type — the constructors return plain `Map`/`Group`/`Layer` values.
+
+| Function                                          | Description                                                       |
+| ------------------------------------------------- | ----------------------------------------------------------------- |
+| `NewMap(v MapVersion) *Map`                       | Empty map; zero-value version defaults to `MapVersion06`.         |
+| `NewGroup(name string) Group`                     | Group with default parallax 100/100 (normal scroll).             |
+| `(*Map).AddGroup(g Group) *Group`                 | Append a group; returns a pointer for chaining.                   |
+| `(*Group).AddLayer(l Layer) *Layer`               | Append a layer; returns a pointer for in-place tile edits.        |
+| `NewTileLayer(name string, w, h int) Layer`       | Regular `w×h` visual tile layer, air-filled.                      |
+| `NewGameLayer(w, h int) Layer`                    | `w×h` game (physics) layer, air-filled.                           |
+| `NewFrontLayer(w, h int) Layer`                   | DDNet front layer (front tiles live in `Tiles`).                  |
+| `NewTeleLayer / NewSpeedupLayer / NewSwitchLayer / NewTuneLayer(w, h int) Layer` | DDNet special layers with their matching special-tile grid. |
+| `NewQuadsLayer(name string) Layer`                | Empty quad layer (append to `Quads`).                             |
+| `(*Layer).SetTile(x, y int, t Tile)`              | Set a tile; panics if out of bounds.                             |
+| `(*Layer).TileAt(x, y int) Tile`                  | Read a tile; panics if out of bounds.                            |
+| `(*Layer).Fill(t Tile)`                           | Set every tile in the `Tiles` grid to `t`.                       |
+
+```go
+m := twmap.NewMap(twmap.MapVersion06)
+g := m.AddGroup(twmap.NewGroup("Game"))
+
+bg := g.AddLayer(twmap.NewTileLayer("bg", 50, 30))
+bg.Fill(twmap.Tile{ID: twmap.TileSolid})
+
+game := g.AddLayer(twmap.NewGameLayer(50, 30))
+game.SetTile(0, 29, twmap.Tile{ID: twmap.TileSolid})
+
+_ = m.Write(out) // serialise to a Teeworlds .map datafile
+```
+
 ### Validation
 
 - `Validate(r io.Reader, opts ...ParseOption) error` — Parses and validates the structural integrity of a map file.
@@ -136,21 +173,24 @@ func main() {
 - `WithParseOptions(opts ...ParseOption) RenderOption` — Pass parse options to `Render` (ignored by `RenderMap`).
 - `RegisterExternalImage(name string, img *image.NRGBA)` — Register a tileset for use during rendering.
 - `RegisterEntitiesImage(img *image.NRGBA)` — Register a DDNet entity-layer sprite sheet (`entities.png`).
+- `RegisterSpeedupArrowImage(img *image.NRGBA)` — Register the DDNet speedup arrow image (`speed_arrow.png`).
 - `WithEntities(entities bool) RenderOption` — Render game-layer entity sprites (pickups/flags and DDNet weapon-removal pickups) at DDNet proportions.
-- `WithGameLayer(gameLayer bool) RenderOption` — Render the game layer as a semi-transparent entities overlay.
+- `WithGameLayer(gameLayer bool) RenderOption` — Render the game layer only as an overlay.
 - `WithFrontLayer(frontLayer bool) RenderOption` — Render the DDNet front layer as a semi-transparent entities overlay.
 - `WithTeleLayer(teleLayer bool) RenderOption` — Render the DDNet tele layer.
-- `WithSpeedupLayer(speedupLayer bool) RenderOption` — Render the DDNet speedup layer.
+- `WithSpeedupLayer(speedupLayer bool) RenderOption` — Render the DDNet speedup layer (requires a registered speedup-arrow asset for the arrow sprite).
 - `WithSwitchLayer(switchLayer bool) RenderOption` — Render the DDNet switch layer.
 - `WithTuneLayer(tuneLayer bool) RenderOption` — Render the DDNet tune layer.
+- `WithOverlayEntities(val int) RenderOption` — Render the combined DDNet editor-style entity overlay (`cl_overlay_entities`) across game/front/tele/speedup/switch/tune.
 - `WithParticles(particles bool) RenderOption` — Render a static (non-animated) particle/capability marker pass from particles.png.
+- `WithInvalidTiles(invalid bool) RenderOption` — Render DDNet-editor-style diagnostics for problematic special-layer state where supported.
 - `RegisterGameSkin(img *image.NRGBA)` — Register a custom game skin image (1024×512, 32×16 grid) for entity rendering.
 - `RegisterParticleImage(img *image.NRGBA)` — Register a particle sprite sheet.
 
 To make the default DDNet/Teeworlds assets available, add a blank import:
 
 ```go
-import _ "github.com/jxsl13/twmap/external" // registers mapres + entities + gameskin + particles
+import _ "github.com/jxsl13/twmap/external" // registers mapres + entities + speeduparrow + gameskin + particles
 ```
 
 Or import only what you need:
@@ -158,6 +198,7 @@ Or import only what you need:
 ```go
 import _ "github.com/jxsl13/twmap/external/mapres"     // tileset images
 import _ "github.com/jxsl13/twmap/external/entities"   // DDNet entity-layer overlay sheet
+import _ "github.com/jxsl13/twmap/external/speeduparrow" // DDNet speedup arrow
 import _ "github.com/jxsl13/twmap/external/gameskin"   // game skin (pickups, flags, spawns)
 import _ "github.com/jxsl13/twmap/external/particles"  // particle sprites
 ```
@@ -172,28 +213,35 @@ DDNet itself treats these asset families separately:
 
 - `mapres` contains visual map tilesets used by regular tile layers.
 - `entities.png` is a dedicated entity-layer overlay sheet used for game/front/tele/speedup/switch/tune visualization.
+- `speed_arrow.png` is the DDNet speedup-arrow sprite used by speedup overlays.
 - `game.png` is the runtime game skin used for pickups and flags.
 - `particles.png` is the particle/effects sheet.
 
 **Rendering details:**
 
-- Only groups with parallax 100/100 and no clipping are rendered.
+- Without `WithCamera(...)`, only groups with parallax 100/100 are rendered.
+  Group clipping is applied when present in the map data.
 - Physics layers (game/front/tele/speedup/switch/tune) are excluded by
   default and can be enabled individually with dedicated options.
   Detail layers are also excluded by default (enable via `WithDetail(true)`).
 - When `WithEntities(true)` is set and a game skin is registered, entity
   sprites (hearts, shields, weapons, flags) are drawn from the game skin
   at their DDNet client proportions (spanning multiple tiles). Without a
-  game skin, colored circles are used as fallback. Spawns are not rendered
+  game skin, entity sprites are not rendered. Spawns are not rendered
   as entity sprites — use `WithGameLayer(true)` to make them visible.
-- When `WithGameLayer(true)` is set, game layer tiles (solid, hookable,
-  freeze, spawns, checkpoints, etc.) are rendered as a semi-transparent
-  overlay using the dedicated entity-layer sheet from `external/entities`,
-  matching the DDNet editor's entity overlay / `cl_overlay_entities` display.
+- When `WithGameLayer(true)` is set, only the game layer tiles (solid,
+  hookable, freeze, spawns, checkpoints, etc.) are rendered as an overlay
+  using the dedicated entity-layer sheet from `external/entities`.
+- When `WithOverlayEntities(val)` is set, the combined DDNet editor-style
+  entity overlay is rendered across game/front/tele/speedup/switch/tune,
+  using DDNet-style overlay alpha semantics.
 - `WithFrontLayer`, `WithTeleLayer`, `WithSpeedupLayer`, `WithSwitchLayer`,
   and `WithTuneLayer` enable rendering of the corresponding DDNet physics
   layers individually. Tele, switch, tune, and speedup overlays also render
   DDNet-style numeric labels when there is enough tile space available.
+- `WithInvalidTiles(true)` keeps problematic speedup-layer state renderable as
+  diagnostics even when the entry would normally disappear from the standard
+  overlay path.
 - When `WithParticles(true)` is set and a particle sheet is registered,
   static (non-animated) particle/capability markers are rendered.
 - The output is cropped to the bounding box of non-air tiles (or the region
@@ -327,6 +375,7 @@ in DDNet's [license.txt](https://github.com/ddnet/ddnet/blob/master/license.txt)
 | `external/gameskin` | `game.png` — game skin sprite sheet (pickups, flags, spawns) | [`data/game.png`](https://github.com/ddnet/ddnet/blob/master/data/game.png) | [external/gameskin/LICENSE](external/gameskin/LICENSE) |
 | `external/mapres` | `*.png` — tileset images (grass, desert, jungle, winter, …) | [`data/mapres/`](https://github.com/ddnet/ddnet/tree/master/data/mapres) | [external/mapres/LICENSE](external/mapres/LICENSE) |
 | `external/particles` | `particles.png` — particle sprite sheet | [`data/particles.png`](https://github.com/ddnet/ddnet/blob/master/data/particles.png) | [external/particles/LICENSE](external/particles/LICENSE) |
+| `external/speeduparrow` | `speed_arrow.png` — DDNet speedup arrow sprite | [`data/editor/speed_arrow.png`](https://github.com/ddnet/ddnet/blob/master/data/editor/speed_arrow.png) | [external/speeduparrow/LICENSE](external/speeduparrow/LICENSE) |
 
 ## References
 
