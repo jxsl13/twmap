@@ -324,6 +324,45 @@ The package exports constants for all DDNet game-layer tile types
 - `IsSolid(id uint8) bool` — True if the tile blocks player movement (solid or unhookable).
 - `IsPassable(id uint8) bool` — True if a player can move through the tile (not solid/death/freeze).
 
+#### Layer-specific tile validity
+
+Raw tile IDs are **not** globally unique in meaning — the same byte value can
+mean different things in different DDNet physics layers. Use the per-layer
+validity helpers (rather than a single global check) so a tile is interpreted
+only in the layer kind it belongs to. The renderer relies on these to avoid
+drawing the wrong semantic symbol for an overlapping ID.
+
+| Function                          | True when the ID is valid in…          |
+| --------------------------------- | -------------------------------------- |
+| `IsValidEntity(id uint8) bool`    | the game/entity layer (any entity)     |
+| `IsValidGameTile(id uint8) bool`  | the game (physics) layer               |
+| `IsValidFrontTile(id uint8) bool` | the DDNet front layer                  |
+| `IsValidTeleTile(id uint8) bool`  | the DDNet teleport layer               |
+| `IsValidSpeedupTile(id uint8) bool` | the DDNet speedup layer              |
+| `IsValidSwitchTile(id uint8) bool`  | the DDNet switch layer               |
+| `IsValidTuneTile(id uint8) bool`    | the DDNet tune layer                 |
+
+#### Typed enum aliases
+
+Small closed enums in the public model travel as typed `uint32` aliases rather
+than anonymous integers:
+
+| Alias              | Constants                                                              |
+| ------------------ | --------------------------------------------------------------------- |
+| `EnvelopeChannels` | `EnvelopeChannelsSound` (1), `EnvelopeChannelsPosition` (3), `EnvelopeChannelsColor` (4) |
+| `ShapeType`        | `ShapeTypeRectangle` (0), `ShapeTypeCircle` (1)                        |
+
+`Envelope.Channels` is an `EnvelopeChannels`; `SoundSource.ShapeType` is a `ShapeType`.
+
+#### Time-valued fields
+
+Time-like fields are exposed as `time.Duration` (not raw map-format integers),
+so callers never have to track which value is milliseconds vs seconds. Parsing
+converts from the file format; writing converts back. Affected fields:
+`EnvPoint.Time`, `Layer.ColorEnvOffset`, `Quad.PosEnvOffset`,
+`Quad.ColorEnvOffset`, `SoundSource.Delay`, `SoundSource.PosEnvOffset`,
+`SoundSource.SoundEnvOffset`.
+
 #### Envelope curve types
 
 | Constant      | Value | Description           |
