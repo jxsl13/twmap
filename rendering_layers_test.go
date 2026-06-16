@@ -119,6 +119,178 @@ func TestRenderMapTeleLayerOnly(t *testing.T) {
 	}
 }
 
+func TestRenderMapTeleLayerKeepsInvalidTileIDsVisible(t *testing.T) {
+	const invalidTeleID = 200
+	RegisterEntitiesImage(makeEntitiesTileset(map[uint8]color.NRGBA{
+		invalidTeleID: {G: 255, A: 255},
+	}))
+
+	m := &Map{
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Layers: []Layer{{
+				Kind:   LayerKindTele,
+				Width:  1,
+				Height: 1,
+				TeleTiles: []TeleTile{{
+					Number: 1,
+					ID:     invalidTeleID,
+				}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m, WithTeleLayer(true))
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+	if !hasPixelInRect(img, img.Bounds(), func(px color.NRGBA) bool {
+		return px.G > 220 && px.R < 80 && px.B < 80
+	}) {
+		t.Fatalf("expected invalid tele tile ID to remain visible in overlay rendering")
+	}
+}
+
+func TestConvertInvalidSpecialLayerTilesRemainVisible(t *testing.T) {
+	tele := convertTeleLayerTiles([]TeleTile{{ID: 200, Number: 1}})
+	if tele[0].ID != 200 {
+		t.Fatalf("expected invalid tele tile ID to be preserved, got %d", tele[0].ID)
+	}
+
+	tune := convertTuneLayerTiles([]TuneTile{{ID: 201, Number: 3}})
+	if tune[0].ID != 201 {
+		t.Fatalf("expected invalid tune tile ID to be preserved, got %d", tune[0].ID)
+	}
+
+	switchTiles := convertSwitchLayerTiles([]SwitchTile{{ID: 202, Flags: TileFlagVFlip, Number: 4, Delay: 2}})
+	if switchTiles[0].ID != 202 {
+		t.Fatalf("expected invalid switch tile ID to be preserved, got %d", switchTiles[0].ID)
+	}
+	if switchTiles[0].Flags != TileFlagVFlip {
+		t.Fatalf("expected invalid switch tile flags to follow IsSwitchTileFlagsUsed semantics, got %d", switchTiles[0].Flags)
+	}
+
+	hiddenSpeedup := convertSpeedupLayerTiles([]SpeedupTile{{ID: 200, Force: 4, MaxSpeed: 6, Angle: 90}}, false)
+	if hiddenSpeedup[0].ID != 0 {
+		t.Fatalf("expected invalid speedup tile to stay hidden without diagnostics, got %d", hiddenSpeedup[0].ID)
+	}
+
+	shownSpeedup := convertSpeedupLayerTiles([]SpeedupTile{{ID: 200, Force: 4, MaxSpeed: 6, Angle: 90}}, true)
+	if shownSpeedup[0].ID != TileSpeedBoost {
+		t.Fatalf("expected invalid speedup diagnostics marker tile, got %d", shownSpeedup[0].ID)
+	}
+}
+
+func TestRenderMapEntitiesWithoutGameSkinSkipsEntitySprites(t *testing.T) {
+	prevSkin := resolveGameSkin()
+	RegisterGameSkin(nil)
+	t.Cleanup(func() {
+		RegisterGameSkin(prevSkin)
+	})
+
+	m := &Map{
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Layers: []Layer{{
+				Kind:   LayerKindGame,
+				Width:  1,
+				Height: 1,
+				Tiles: []Tile{{
+					ID: TileHealth,
+				}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m, WithEntities(true))
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	if px := centerPixel(img); px != (color.NRGBA{R: checkerLight, G: checkerLight, B: checkerLight, A: 255}) {
+		t.Fatalf("expected checkerboard only without a registered game skin, got %#v", px)
+	}
+}
+
+func TestRenderMapSpeedupLayerWithoutArrowAssetSkipsValidTiles(t *testing.T) {
+	prevArrow := resolveSpeedupArrowImage()
+	prevArrowArray := resolveSpeedupArrowArrayImage()
+	RegisterSpeedupArrowImage(nil)
+	RegisterSpeedupArrowArrayImage(nil)
+	t.Cleanup(func() {
+		RegisterSpeedupArrowImage(prevArrow)
+		RegisterSpeedupArrowArrayImage(prevArrowArray)
+	})
+
+	m := &Map{
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Layers: []Layer{{
+				Kind:   LayerKindSpeedup,
+				Width:  1,
+				Height: 1,
+				SpeedupTiles: []SpeedupTile{{
+					Force:    8,
+					MaxSpeed: 6,
+					ID:       TileSpeedBoost,
+				}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m, WithSpeedupLayer(true))
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	if px := centerPixel(img); px != (color.NRGBA{R: checkerLight, G: checkerLight, B: checkerLight, A: 255}) {
+		t.Fatalf("expected no valid speedup rendering without arrow asset, got %#v", px)
+	}
+}
+
+func TestRenderMapInvalidSpeedupDiagnosticsRenderWithoutArrowAsset(t *testing.T) {
+	prevArrow := resolveSpeedupArrowImage()
+	prevArrowArray := resolveSpeedupArrowArrayImage()
+	RegisterSpeedupArrowImage(nil)
+	RegisterSpeedupArrowArrayImage(nil)
+	t.Cleanup(func() {
+		RegisterSpeedupArrowImage(prevArrow)
+		RegisterSpeedupArrowArrayImage(prevArrowArray)
+	})
+
+	m := &Map{
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Layers: []Layer{{
+				Kind:   LayerKindSpeedup,
+				Width:  1,
+				Height: 1,
+				SpeedupTiles: []SpeedupTile{{
+					Force:    8,
+					MaxSpeed: 6,
+					Angle:    90,
+					ID:       200,
+				}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m, WithSpeedupLayer(true), WithInvalidTiles(true))
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	if !hasPixelInRect(img, img.Bounds(), func(px color.NRGBA) bool {
+		return px.R > 220 && px.G > 220 && px.B > 220
+	}) {
+		t.Fatalf("expected invalid speedup diagnostics text to render")
+	}
+}
+
 func TestRenderMapParticlesLayerOnly(t *testing.T) {
 	RegisterParticleImage(makeParticlesSheetAirJump(color.NRGBA{G: 255, A: 255}))
 
@@ -257,6 +429,104 @@ func TestRenderMapWithoutBaseLayerKindsSkipsTileLayers(t *testing.T) {
 	}
 	if img.Bounds().Dx() != 1 || img.Bounds().Dy() != 1 {
 		t.Fatalf("expected filtered render to collapse to 1x1 output, got %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+}
+
+func TestRenderMapAppliesGroupClipping(t *testing.T) {
+	m := &Map{
+		Images: []Image{{
+			Name:   "test",
+			Width:  256,
+			Height: 256,
+			RGBA: makeEntitiesTileset(map[uint8]color.NRGBA{
+				1: {R: 255, A: 255},
+			}),
+		}},
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Clipping:  true,
+			ClipX:     0,
+			ClipY:     0,
+			ClipW:     32,
+			ClipH:     32,
+			Layers: []Layer{{
+				Kind:    LayerKindTiles,
+				ImageID: 0,
+				Width:   2,
+				Height:  1,
+				ColorR:  255,
+				ColorG:  255,
+				ColorB:  255,
+				ColorA:  255,
+				Tiles:   []Tile{{ID: 1}, {ID: 1}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m, WithRegion(MapBounds{MinX: 0, MinY: 0, MaxX: 2, MaxY: 1}))
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	midX := img.Bounds().Dx() / 2
+	if !hasPixelInRect(img, image.Rect(0, 0, midX, img.Bounds().Dy()), func(px color.NRGBA) bool {
+		return px.R > 220 && px.G < 80 && px.B < 80
+	}) {
+		t.Fatalf("expected clipped left half to contain rendered tile pixels")
+	}
+	if hasPixelInRect(img, image.Rect(midX, 0, img.Bounds().Dx(), img.Bounds().Dy()), func(px color.NRGBA) bool {
+		return px.R > 220 && px.G < 80 && px.B < 80
+	}) {
+		t.Fatalf("expected right half to be suppressed by group clipping")
+	}
+	if !hasPixelInRect(img, image.Rect(midX, 0, img.Bounds().Dx(), img.Bounds().Dy()), func(px color.NRGBA) bool {
+		return px.R >= checkerDark && px.R <= checkerLight && px.G == px.R && px.B == px.R
+	}) {
+		t.Fatalf("expected checkerboard background on the clipped half")
+	}
+}
+
+func TestRenderMapGameLayerDrawsDeathBorderOutsideLayer(t *testing.T) {
+	RegisterEntitiesImage(makeEntitiesTileset(map[uint8]color.NRGBA{
+		TileSolid: {B: 255, A: 255},
+		TileDeath: {R: 255, A: 255},
+	}))
+
+	m := &Map{
+		Groups: []Group{{
+			ParallaxX: 100,
+			ParallaxY: 100,
+			Layers: []Layer{{
+				Kind:   LayerKindGame,
+				Width:  1,
+				Height: 1,
+				Tiles: []Tile{{
+					ID: TileSolid,
+				}},
+			}},
+		}},
+	}
+
+	img, err := RenderMap(m,
+		WithRegion(MapBounds{MinX: -1, MinY: -1, MaxX: 2, MaxY: 2}),
+		WithGameLayer(true),
+	)
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+
+	thirdW := img.Bounds().Dx() / 3
+	thirdH := img.Bounds().Dy() / 3
+	if !hasPixelInRect(img, image.Rect(thirdW, thirdH, thirdW*2, thirdH*2), func(px color.NRGBA) bool {
+		return px.B > 220 && px.R < 80 && px.G < 80
+	}) {
+		t.Fatalf("expected center tile to render the game-layer tile")
+	}
+	if !hasPixelInRect(img, image.Rect(0, 0, thirdW, thirdH), func(px color.NRGBA) bool {
+		return px.R > 120 && px.G < 80 && px.B < 80
+	}) {
+		t.Fatalf("expected outer area to contain death-border pixels")
 	}
 }
 

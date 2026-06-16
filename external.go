@@ -133,6 +133,62 @@ func resolveEntitiesImage() *image.NRGBA {
 	return img
 }
 
+// speedupArrowImage holds the registered DDNet speedup arrow sprite sheet.
+// There is a single active speedup arrow image; registering a new one replaces the old.
+var speedupArrowImage *image.NRGBA
+
+// speedupArrowMu guards speedupArrowImage for concurrent access.
+var speedupArrowMu sync.RWMutex
+
+// RegisterSpeedupArrowImage registers the DDNet speedup arrow image.
+// There is a single active speedup arrow image; calling this function replaces
+// any previously registered one. The default is provided by importing:
+//
+//	import _ "github.com/jxsl13/twmap/external/speeduparrow"
+func RegisterSpeedupArrowImage(img *image.NRGBA) {
+	speedupArrowMu.Lock()
+	speedupArrowImage = img
+	speedupArrowMu.Unlock()
+}
+
+// resolveSpeedupArrowImage returns the currently registered speedup arrow image, or nil.
+func resolveSpeedupArrowImage() *image.NRGBA {
+	speedupArrowMu.RLock()
+	img := speedupArrowImage
+	speedupArrowMu.RUnlock()
+	return img
+}
+
+// speedupArrowArrayImage holds the registered DDNet speedup-arrow sprite array
+// (speed_arrow_array.png): a 16×16 grid of per-degree pre-rotated arrows.
+// There is a single active image; registering a new one replaces the old.
+var speedupArrowArrayImage *image.NRGBA
+
+// speedupArrowArrayMu guards speedupArrowArrayImage for concurrent access.
+var speedupArrowArrayMu sync.RWMutex
+
+// RegisterSpeedupArrowArrayImage registers the DDNet speedup-arrow sprite array
+// (speed_arrow_array.png). When registered, the speedup overlay renders arrows
+// from this array (DDNet-accurate, frame = angle%90 + quadrant rotation);
+// otherwise it falls back to the single speed_arrow.png path. There is a single
+// active image; calling this function replaces any previously registered one.
+// The default is provided by importing:
+//
+//	import _ "github.com/jxsl13/twmap/external/speeduparrow"
+func RegisterSpeedupArrowArrayImage(img *image.NRGBA) {
+	speedupArrowArrayMu.Lock()
+	speedupArrowArrayImage = img
+	speedupArrowArrayMu.Unlock()
+}
+
+// resolveSpeedupArrowArrayImage returns the registered speedup-arrow array image, or nil.
+func resolveSpeedupArrowArrayImage() *image.NRGBA {
+	speedupArrowArrayMu.RLock()
+	img := speedupArrowArrayImage
+	speedupArrowArrayMu.RUnlock()
+	return img
+}
+
 // gameSkinImage holds the registered game skin image (default: "game").
 // There is a single active game skin; registering a new one replaces the old.
 var gameSkinImage *image.NRGBA
@@ -165,8 +221,8 @@ func resolveGameSkin() *image.NRGBA {
 // ToNRGBA converts any [image.Image] to [*image.NRGBA].
 // If the source is already *image.NRGBA it is returned as-is.
 // This is a convenience helper for preparing images before passing them
-// to [RegisterExternalImage], [RegisterEntitiesImage], [RegisterGameSkin],
-// or [RegisterParticleImage].
+// to [RegisterExternalImage], [RegisterEntitiesImage], [RegisterSpeedupArrowImage],
+// [RegisterGameSkin], or [RegisterParticleImage].
 func ToNRGBA(src image.Image) *image.NRGBA {
 	if nrgba, ok := src.(*image.NRGBA); ok {
 		return nrgba

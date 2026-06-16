@@ -55,6 +55,7 @@ Active workstream: public helper API to build multi-layer maps from scratch — 
 - I.cmd       — `cmd/render_tutorial/main.go` renders Tutorial map variants (only categories that change output).
 - I.render.pipeline — `collectRenderSteps`→`collectOverlayRenderLayers`→`cropToNonAir`→`prepareTilesets`/`prepareQuadImages`→`renderAllSteps`→`renderParticles`→`renderEntities`→`renderOverlayLayers`.
 - I.render.offsets  — `computeGroupRenderOffsets` sole offset/parallax→render-space translation.
+- I.speeduparrowarray — `external/speeduparrow/speed_arrow_array.png` (DDNet `data/editor/`, CC-BY-SA, existing `external/speeduparrow/LICENSE` covers it) embedded via blank-import init; new `RegisterSpeedupArrowArrayImage(img *image.NRGBA)` + `resolveSpeedupArrowArrayImage()` mirror `RegisterSpeedupArrowImage` (external.go:148) + `speeduparrow.go` init pattern.
 
 ## §V Invariants
 
@@ -77,6 +78,7 @@ Active workstream: public helper API to build multi-layer maps from scratch — 
 - V17 — render order: physics overlays (game/front/tele/switch/tune/speedup) render LAST, above base+particles+entities (editor layering; entity sprites never cover game layer).
 - V18 — group offset/parallax translated ONLY in `computeGroupRenderOffsets`; base tiles/quads/entities/particles share it; tile offsets stay fractional (no sub-tile truncation).
 - V19 — tele/switch/tune/speedup numeric labels in separate text sub-pass → survive missing entities texture.
+- V20 — speedup overlay arrow drawn from embedded DDNet `speed_arrow_array.png` sprite sheet, frame/sprite chosen by tile angle. When array image unregistered → fall back to current single-`speed_arrow.png`/procedural path (no regression, no panic). Asset blank-import-only (no hard dep in core pkg).
 
 ## §T Tasks
 
@@ -95,7 +97,8 @@ T11|x|AddImage + AddExternalImage index wiring|I.api.AddImage,I.api.AddExtImage,
 T12|x|tests + README/example for T8-T11|V9,V10,V11,V12,C2,C3
 T13|.|design-space vs camera-space full-map export mode (open issue)|I.render
 T14|.|DDNet text-renderer/atlas parity for overlay labels (replace internal bitmap font)|V19,I.render
-T15|.|speedup use real speed_arrow_array.png asset (replace procedural arrow)|I.render,I.external
+T15|x|fetch+embed DDNet speed_arrow_array.png in external/speeduparrow; RegisterSpeedupArrowArrayImage + resolve + init blank-import (unblocked: asset confirmed in DDNet data/editor/)|V20,I.external,I.speeduparrowarray
+T21|x|switch speedup render path to array sprite (angle→frame), fallback to current arrow when array nil|V20,I.render
 T16|.|tutorial export: avoid full native-res cost on wide maps|I.cmd
 T17|.|visual regression tests vs DDNet editor (heavy speedup/tune/switch)|V16,I.render
 T18|.|golden-image suite for multi-group parallax maps|V18,I.render

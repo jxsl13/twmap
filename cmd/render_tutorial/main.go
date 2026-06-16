@@ -13,14 +13,16 @@ import (
 )
 
 const (
-	tutorialMapPath = "testdata/Tutorial.map"
-	outputDir       = "tutorial_renders"
-	outputPrefix    = "tutorial_rendered"
+	tutorialMapPath  = "testdata/Tutorial.map"
+	outputDir        = "tutorial_renders"
+	outputPrefix     = "tutorial_rendered"
+	editorOverlayVal = 50
 )
 
 type renderToggle struct {
-	name string
-	opt  twmap.RenderOption
+	name        string
+	opt         twmap.RenderOption
+	incremental bool
 }
 
 func main() {
@@ -36,8 +38,13 @@ func main() {
 	}
 
 	b := gameLayerBounds(m)
-	cx := float64(b.MinX+b.MaxX) / 2.0
-	cy := float64(b.MinY+b.MaxY) / 2.0
+	// Use the left/top edge of the game layer as the camera origin.
+	// For parallax groups, the camera contributes camX*(1-P/100) to their
+	// tile offset. Using the left edge (MinX/MinY) keeps that additive term
+	// at zero, so the only remaining horizontal displacement is the group's
+	// own OffsetX — the minimum achievable for any non-negative camera.
+	cx := float64(b.MinX)
+	cy := float64(b.MinY)
 
 	if err := os.RemoveAll(outputDir); err != nil {
 		log.Fatal(err)
@@ -52,12 +59,18 @@ func main() {
 	}
 
 	toggles := availableToggles(m)
+	incrementalToggles := make([]renderToggle, 0, len(toggles))
+	for _, toggle := range toggles {
+		if toggle.incremental {
+			incrementalToggles = append(incrementalToggles, toggle)
+		}
+	}
 
 	if err := renderVariant(m, filepath.Join(outputDir, outputPrefix+"_incremental_00_base.png"), baseOptions, nil); err != nil {
 		log.Fatal(err)
 	}
-	progressive := make([]twmap.RenderOption, 0, len(toggles))
-	for i, toggle := range toggles {
+	progressive := make([]twmap.RenderOption, 0, len(incrementalToggles))
+	for i, toggle := range incrementalToggles {
 		progressive = append(progressive, toggle.opt)
 		name := fmt.Sprintf("%s_incremental_%02d_%s.png", outputPrefix, i+1, toggle.name)
 		if err := renderVariant(m, filepath.Join(outputDir, name), baseOptions, progressive); err != nil {
@@ -75,39 +88,54 @@ func main() {
 		}
 	}
 
-	fmt.Printf("rendered %d incremental frames and %d non-incremental variants into %s\n", len(toggles)+1, len(toggles)+1, outputDir)
+	fmt.Printf("rendered %d incremental frames and %d non-incremental variants into %s\n", len(incrementalToggles)+1, len(toggles)+1, outputDir)
 }
 
 func availableToggles(m *twmap.Map) []renderToggle {
-	toggles := make([]renderToggle, 0, 9)
+	toggles := make([]renderToggle, 0, 10)
 	if hasDetailLayers(m) {
-		toggles = append(toggles, renderToggle{name: "detail", opt: twmap.WithDetail(true)})
+		toggles = append(toggles, renderToggle{name: "detail", opt: twmap.WithDetail(true), incremental: true})
 	}
 	if hasParticleMarkers(m) {
-		toggles = append(toggles, renderToggle{name: "particles", opt: twmap.WithParticles(true)})
+		toggles = append(toggles, renderToggle{name: "particles", opt: twmap.WithParticles(true), incremental: true})
+	}
+	if hasEditorOverlayLayers(m) {
+		// The DDNet overlay-entities mode changes the opacity of already rendered
+		// design layers, so it is useful as a standalone option preview but not as
+		// part of the additive incremental tutorial sequence.
+		toggles = append(toggles, renderToggle{name: "overlay_entities_50", opt: twmap.WithOverlayEntities(editorOverlayVal)})
 	}
 	if hasSwitchTiles(m) {
-		toggles = append(toggles, renderToggle{name: "switch_layer", opt: twmap.WithSwitchLayer(true)})
+		toggles = append(toggles, renderToggle{name: "switch_only_layer", opt: twmap.WithSwitchLayer(true), incremental: true})
 	}
 	if hasTeleTiles(m) {
-		toggles = append(toggles, renderToggle{name: "tele_layer", opt: twmap.WithTeleLayer(true)})
+		toggles = append(toggles, renderToggle{name: "tele_only_layer", opt: twmap.WithTeleLayer(true), incremental: true})
 	}
 	if hasSpeedupTiles(m) {
-		toggles = append(toggles, renderToggle{name: "speedup_layer", opt: twmap.WithSpeedupLayer(true)})
+		toggles = append(toggles, renderToggle{name: "speedup_only_layer", opt: twmap.WithSpeedupLayer(true), incremental: true})
 	}
 	if hasTuneTiles(m) {
-		toggles = append(toggles, renderToggle{name: "tune_layer", opt: twmap.WithTuneLayer(true)})
+		toggles = append(toggles, renderToggle{name: "tune_only_layer", opt: twmap.WithTuneLayer(true), incremental: true})
 	}
 	if hasGameOverlayTiles(m) {
-		toggles = append(toggles, renderToggle{name: "game_layer", opt: twmap.WithGameLayer(true)})
+		toggles = append(toggles, renderToggle{name: "game_only_layer", opt: twmap.WithGameLayer(true), incremental: true})
 	}
 	if hasFrontOverlayTiles(m) {
-		toggles = append(toggles, renderToggle{name: "front_layer", opt: twmap.WithFrontLayer(true)})
+		toggles = append(toggles, renderToggle{name: "front_only_layer", opt: twmap.WithFrontLayer(true), incremental: true})
 	}
 	if hasRenderableEntities(m) {
-		toggles = append(toggles, renderToggle{name: "entities", opt: twmap.WithEntities(true)})
+		toggles = append(toggles, renderToggle{name: "entities", opt: twmap.WithEntities(true), incremental: true})
 	}
 	return toggles
+}
+
+func hasEditorOverlayLayers(m *twmap.Map) bool {
+	return hasGameOverlayTiles(m) ||
+		hasFrontOverlayTiles(m) ||
+		hasTeleTiles(m) ||
+		hasSpeedupTiles(m) ||
+		hasSwitchTiles(m) ||
+		hasTuneTiles(m)
 }
 
 func hasDetailLayers(m *twmap.Map) bool {
@@ -144,7 +172,7 @@ func hasSwitchTiles(m *twmap.Map) bool {
 				continue
 			}
 			for _, tile := range l.SwitchTiles {
-				if twmap.IsValidSwitchTile(tile.ID) {
+				if tile.ID != 0 {
 					return true
 				}
 			}
@@ -160,7 +188,7 @@ func hasTeleTiles(m *twmap.Map) bool {
 				continue
 			}
 			for _, tile := range l.TeleTiles {
-				if twmap.IsValidTeleTile(tile.ID) {
+				if tile.ID != 0 {
 					return true
 				}
 			}
@@ -176,7 +204,8 @@ func hasSpeedupTiles(m *twmap.Map) bool {
 				continue
 			}
 			for _, tile := range l.SpeedupTiles {
-				if twmap.IsValidSpeedupTile(tile.ID) && (tile.Force != 0 || tile.MaxSpeed != 0) {
+				if (twmap.IsValidSpeedupTile(tile.ID) && (tile.Force != 0 || tile.MaxSpeed != 0)) ||
+					tile.ID != 0 || tile.Force != 0 || tile.MaxSpeed != 0 || tile.Angle != 0 {
 					return true
 				}
 			}
@@ -192,7 +221,7 @@ func hasTuneTiles(m *twmap.Map) bool {
 				continue
 			}
 			for _, tile := range l.TuneTiles {
-				if twmap.IsValidTuneTile(tile.ID) {
+				if tile.ID != 0 {
 					return true
 				}
 			}

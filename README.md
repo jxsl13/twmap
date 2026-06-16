@@ -179,6 +179,7 @@ _ = m.Write(out) // serialise to a Teeworlds .map datafile
 - `RegisterExternalImage(name string, img *image.NRGBA)` — Register a tileset for use during rendering.
 - `RegisterEntitiesImage(img *image.NRGBA)` — Register a DDNet entity-layer sprite sheet (`entities.png`).
 - `RegisterSpeedupArrowImage(img *image.NRGBA)` — Register the DDNet speedup arrow image (`speed_arrow.png`).
+- `RegisterSpeedupArrowArrayImage(img *image.NRGBA)` — Register the DDNet speedup-arrow sprite array (`speed_arrow_array.png`, 16×16 grid of per-degree arrows). When registered, speedup overlays render DDNet-accurate arrows (frame = `angle%90` + quadrant rotation); otherwise the single `speed_arrow.png` path is used.
 - `WithEntities(entities bool) RenderOption` — Render game-layer entity sprites (pickups/flags and DDNet weapon-removal pickups) at DDNet proportions.
 - `WithGameLayer(gameLayer bool) RenderOption` — Render the game layer only as an overlay.
 - `WithFrontLayer(frontLayer bool) RenderOption` — Render the DDNet front layer as a semi-transparent entities overlay.
@@ -218,7 +219,9 @@ DDNet itself treats these asset families separately:
 
 - `mapres` contains visual map tilesets used by regular tile layers.
 - `entities.png` is a dedicated entity-layer overlay sheet used for game/front/tele/speedup/switch/tune visualization.
-- `speed_arrow.png` is the DDNet speedup-arrow sprite used by speedup overlays.
+- `speed_arrow.png` is the DDNet speedup-arrow sprite used by speedup overlays;
+  `speed_arrow_array.png` is the per-degree sprite array preferred for
+  DDNet-accurate arrow rotation when registered.
 - `game.png` is the runtime game skin used for pickups and flags.
 - `particles.png` is the particle/effects sheet.
 
@@ -419,7 +422,7 @@ in DDNet's [license.txt](https://github.com/ddnet/ddnet/blob/master/license.txt)
 | `external/gameskin` | `game.png` — game skin sprite sheet (pickups, flags, spawns) | [`data/game.png`](https://github.com/ddnet/ddnet/blob/master/data/game.png) | [external/gameskin/LICENSE](external/gameskin/LICENSE) |
 | `external/mapres` | `*.png` — tileset images (grass, desert, jungle, winter, …) | [`data/mapres/`](https://github.com/ddnet/ddnet/tree/master/data/mapres) | [external/mapres/LICENSE](external/mapres/LICENSE) |
 | `external/particles` | `particles.png` — particle sprite sheet | [`data/particles.png`](https://github.com/ddnet/ddnet/blob/master/data/particles.png) | [external/particles/LICENSE](external/particles/LICENSE) |
-| `external/speeduparrow` | `speed_arrow.png` — DDNet speedup arrow sprite | [`data/editor/speed_arrow.png`](https://github.com/ddnet/ddnet/blob/master/data/editor/speed_arrow.png) | [external/speeduparrow/LICENSE](external/speeduparrow/LICENSE) |
+| `external/speeduparrow` | `speed_arrow.png`, `speed_arrow_array.png` — DDNet speedup arrow sprites | [`data/editor/speed_arrow.png`](https://github.com/ddnet/ddnet/blob/master/data/editor/speed_arrow.png), [`speed_arrow_array.png`](https://github.com/ddnet/ddnet/blob/master/data/editor/speed_arrow_array.png) | [external/speeduparrow/LICENSE](external/speeduparrow/LICENSE) |
 
 ## References
 

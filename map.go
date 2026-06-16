@@ -161,20 +161,22 @@ const (
 // ── Quad ─────────────────────────────────────────────────────────────────────
 
 // Quad represents a single quad in a quads layer.
-// Positions use 17.15 fixed-point.
+// Point coordinates are stored as raw 17.15 fixed-point integers.
 type Quad struct {
 	Points         [5]Point // corners[4] + position
 	Colors         [4]color.NRGBA
-	TexCoords      [4]Point
+	TexCoords      [4]Point // raw 22.10 fixed-point texture coordinates
 	PosEnv         int32
 	PosEnvOffset   time.Duration // milliseconds in the map file
 	ColorEnv       int32
 	ColorEnvOffset time.Duration // milliseconds in the map file
 }
 
-// Point is a 2D coordinate (fixed-point 17.15 in the datafile).
+// Point stores raw fixed-point coordinates from the datafile.
+// Depending on the call site, the raw values represent either 17.15 world
+// coordinates or 22.10 texture coordinates.
 type Point struct {
-	X, Y float64
+	X, Y int
 }
 
 // ── Map version ──────────────────────────────────────────────────────────────
@@ -1409,25 +1411,23 @@ func decodeQuads(data []byte, numQuads int) []Quad {
 	return quads
 }
 
-// readPoint reads a 22.10 fixed-point 2D point, returning tile coordinates
-// (world coords / 32). This is equivalent to dividing the raw int32 by 32768.
+// readPoint reads a raw 17.15 fixed-point 2D point.
 func readPoint(data []byte) Point {
 	x := int32(binary.LittleEndian.Uint32(data[0:4]))
 	y := int32(binary.LittleEndian.Uint32(data[4:8]))
 	return Point{
-		X: float64(x) / 32768.0,
-		Y: float64(y) / 32768.0,
+		X: int(x),
+		Y: int(y),
 	}
 }
 
-// readTexCoord reads a 22.10 fixed-point texture coordinate, returning
-// normalized [0,1] values (standard fx2f: raw / 1024).
+// readTexCoord reads a raw 22.10 fixed-point texture coordinate.
 func readTexCoord(data []byte) Point {
 	x := int32(binary.LittleEndian.Uint32(data[0:4]))
 	y := int32(binary.LittleEndian.Uint32(data[4:8]))
 	return Point{
-		X: float64(x) / 1024.0,
-		Y: float64(y) / 1024.0,
+		X: int(x),
+		Y: int(y),
 	}
 }
 
