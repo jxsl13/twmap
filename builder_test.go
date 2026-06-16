@@ -2,6 +2,7 @@ package twmap
 
 import (
 	"bytes"
+	"image"
 	"testing"
 )
 
@@ -87,6 +88,108 @@ func TestTileAccessors(t *testing.T) {
 			}()
 			l.SetTile(x, y, Tile{})
 		}(p[0], p[1])
+	}
+}
+
+// V12 — NewSoundLayer defaults.
+func TestNewSoundLayer(t *testing.T) {
+	l := NewSoundLayer("amb")
+	if l.Kind != LayerKindSounds {
+		t.Errorf("kind: got %d, want %d", l.Kind, LayerKindSounds)
+	}
+	if l.SoundID != -1 || l.ImageID != -1 || l.ColorEnv != -1 || l.QuadImageID != -1 {
+		t.Errorf("ref ids not -1: snd=%d img=%d env=%d quad=%d", l.SoundID, l.ImageID, l.ColorEnv, l.QuadImageID)
+	}
+	if len(l.SoundSources) != 0 {
+		t.Errorf("SoundSources: got %d, want 0", len(l.SoundSources))
+	}
+}
+
+// V9 — special-tile accessors write the matching grid and bounds-panic.
+func TestSpecialTileAccessors(t *testing.T) {
+	tele := NewTeleLayer(3, 2)
+	tele.SetTeleTile(2, 1, TeleTile{Number: 7, ID: TileTeleInEvil})
+	if got := tele.TeleTileAt(2, 1); got.Number != 7 || got.ID != TileTeleInEvil {
+		t.Errorf("tele: got %+v", got)
+	}
+	if tele.TeleTiles[1*3+2].Number != 7 { // matching grid, row-major
+		t.Error("SetTeleTile wrote wrong grid/index")
+	}
+
+	su := NewSpeedupLayer(2, 2)
+	su.SetSpeedupTile(1, 1, SpeedupTile{Force: 50, Angle: 90})
+	if su.SpeedupTileAt(1, 1).Force != 50 {
+		t.Error("speedup accessor mismatch")
+	}
+	sw := NewSwitchLayer(2, 2)
+	sw.SetSwitchTile(0, 1, SwitchTile{Number: 3})
+	if sw.SwitchTileAt(0, 1).Number != 3 {
+		t.Error("switch accessor mismatch")
+	}
+	tn := NewTuneLayer(2, 2)
+	tn.SetTuneTile(1, 0, TuneTile{Number: 4})
+	if tn.TuneTileAt(1, 0).Number != 4 {
+		t.Error("tune accessor mismatch")
+	}
+
+	func() { // V9 bounds-panic
+		defer func() {
+			if recover() == nil {
+				t.Error("SetTeleTile out of bounds: expected panic")
+			}
+		}()
+		tele.SetTeleTile(3, 0, TeleTile{})
+	}()
+}
+
+// V10 — NewQuad geometry, colors, texcoords, envelopes.
+func TestNewQuad(t *testing.T) {
+	q := NewQuad(4, 2, 2, 2) // center (4,2), 2x2 tiles
+	const u = 1 << 15
+	wantPts := [5]Point{
+		{X: 3 * u, Y: 1 * u}, // TL
+		{X: 5 * u, Y: 1 * u}, // TR
+		{X: 3 * u, Y: 3 * u}, // BL
+		{X: 5 * u, Y: 3 * u}, // BR
+		{X: 4 * u, Y: 2 * u}, // center
+	}
+	if q.Points != wantPts {
+		t.Errorf("points: got %+v, want %+v", q.Points, wantPts)
+	}
+	for i, c := range q.Colors {
+		if c.R != 255 || c.G != 255 || c.B != 255 || c.A != 255 {
+			t.Errorf("color %d not opaque white: %+v", i, c)
+		}
+	}
+	const tu = 1 << 10
+	wantTex := [4]Point{{0, 0}, {tu, 0}, {0, tu}, {tu, tu}}
+	if q.TexCoords != wantTex {
+		t.Errorf("texcoords: got %+v, want %+v", q.TexCoords, wantTex)
+	}
+	if q.PosEnv != -1 || q.ColorEnv != -1 {
+		t.Errorf("envs: posEnv=%d colorEnv=%d, want -1", q.PosEnv, q.ColorEnv)
+	}
+}
+
+// V11 — AddImage/AddExternalImage index wiring and fields.
+func TestAddImages(t *testing.T) {
+	m := NewMap(MapVersion06)
+	rgba := image.NewNRGBA(image.Rect(0, 0, 64, 32))
+	i0 := m.AddImage("grass", rgba)
+	i1 := m.AddExternalImage("desert", 128, 96)
+	if i0 != 0 || i1 != 1 {
+		t.Fatalf("indices: got %d,%d want 0,1", i0, i1)
+	}
+	if len(m.Images) != 2 {
+		t.Fatalf("images len: %d", len(m.Images))
+	}
+	emb := m.Images[i0]
+	if emb.External || emb.RGBA == nil || emb.Width != 64 || emb.Height != 32 {
+		t.Errorf("embedded image wrong: %+v", emb)
+	}
+	ext := m.Images[i1]
+	if !ext.External || ext.RGBA != nil || ext.Width != 128 || ext.Height != 96 {
+		t.Errorf("external image wrong: %+v", ext)
 	}
 }
 

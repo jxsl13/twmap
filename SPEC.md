@@ -29,6 +29,14 @@ Add public helper API to build multi-layer TW/DDNet maps from scratch — correc
 - I.api.TileAt        — `(*Layer).TileAt(x, y int) Tile`
 - I.api.Fill          — `(*Layer).Fill(t Tile)`
 - I.api.tileIndex     — `(*Layer).tileIndex(x, y int) int` (unexported, y*W+x)
+- I.api.NewSoundLayer — `NewSoundLayer(name string) Layer` (Kind=Sounds, SoundID=-1)
+- I.api.SetTeleTile   — `(*Layer).SetTeleTile/TeleTileAt(x,y int[, t TeleTile])`
+- I.api.SetSpeedup    — `(*Layer).SetSpeedupTile/SpeedupTileAt`
+- I.api.SetSwitchTile — `(*Layer).SetSwitchTile/SwitchTileAt`
+- I.api.SetTuneTile   — `(*Layer).SetTuneTile/TuneTileAt`
+- I.api.NewQuad       — `NewQuad(cx, cy, w, h int) Quad` (tile units; white corners, unit texcoords)
+- I.api.AddImage      — `(*Map).AddImage(name string, rgba *image.NRGBA) int` (embedded, returns index)
+- I.api.AddExtImage   — `(*Map).AddExternalImage(name string, w, h int) int` (external ref, returns index)
 
 ## §V Invariants
 
@@ -40,6 +48,10 @@ Add public helper API to build multi-layer TW/DDNet maps from scratch — correc
 - V6 — `NewMap` defaults `Version=MapVersion06` when arg zero-value; Info empty but writable.
 - V7 — `SetTile`/`TileAt` out of `[0,Width)×[0,Height)` panic slice-style (bounds-checked, no silent clobber).
 - V8 — physics ctors set `Kind` correct + alloc matching special-tile slice (`TeleTiles` len W*H for tele, etc.), tile-layer ctors alloc `Tiles` len W*H air.
+- V9 — special-tile accessors (`SetTeleTile`/`SetSpeedupTile`/`SetSwitchTile`/`SetTuneTile` + `*At`) write/read matching special slice (not base `Tiles`), bounds-panic like V7.
+- V10 — `NewQuad` default: 4 corners axis-aligned rect around center, `Points[4]`=center, all `Colors` opaque white, `TexCoords` unit square, `PosEnv=ColorEnv=-1`. Tile→raw factor confirmed: world 17.15 → 1 tile = 1<<15 raw (rendering `rawWorldCoordToTileFloat=raw/32768`); tex 22.10 → 1.0 = 1<<10 raw.
+- V11 — `AddImage`/`AddExternalImage` append to `Map.Images`, return index == slice position. Embedded: `External=false`, `RGBA` set, W/H from image bounds. External: `External=true`, `RGBA=nil`.
+- V12 — `NewSoundLayer` sets `Kind=Sounds`, `SoundID=-1`, empty `SoundSources`, ref ids -1.
 
 ## §T Tasks
 
@@ -51,6 +63,11 @@ T4|x|AddLayer + tile accessors SetTile/TileAt/Fill/tileIndex|I.api.AddLayer,I.ap
 T5|x|round-trip test: build map scratch → Write → Parse → Validate equal|V5,C3
 T6|x|example_test ExampleNewMap + README API-overview section|I.builder,C2
 T7|x|table tests for defaults/bounds-panic invariants|V1,V2,V3,V4,V7
+T8|x|NewSoundLayer ctor|I.api.NewSoundLayer,V12
+T9|x|special-tile accessors Set/At tele/speedup/switch/tune|I.api.SetTeleTile,I.api.SetSpeedup,I.api.SetSwitchTile,I.api.SetTuneTile,V9
+T10|x|NewQuad helper (confirm tile→raw fxp factor vs rendering)|I.api.NewQuad,V10
+T11|x|AddImage + AddExternalImage index wiring|I.api.AddImage,I.api.AddExtImage,V11
+T12|x|tests + README/example for T8-T11|V9,V10,V11,V12,C2,C3
 
 ## §B Bugs
 

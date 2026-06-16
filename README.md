@@ -130,9 +130,14 @@ builder type — the constructors return plain `Map`/`Group`/`Layer` values.
 | `NewFrontLayer(w, h int) Layer`                   | DDNet front layer (front tiles live in `Tiles`).                  |
 | `NewTeleLayer / NewSpeedupLayer / NewSwitchLayer / NewTuneLayer(w, h int) Layer` | DDNet special layers with their matching special-tile grid. |
 | `NewQuadsLayer(name string) Layer`                | Empty quad layer (append to `Quads`).                             |
+| `NewSoundLayer(name string) Layer`                | Empty sound layer (append to `SoundSources`).                    |
 | `(*Layer).SetTile(x, y int, t Tile)`              | Set a tile; panics if out of bounds.                             |
 | `(*Layer).TileAt(x, y int) Tile`                  | Read a tile; panics if out of bounds.                            |
 | `(*Layer).Fill(t Tile)`                           | Set every tile in the `Tiles` grid to `t`.                       |
+| `(*Layer).SetTeleTile / SetSpeedupTile / SetSwitchTile / SetTuneTile` (+ `*At`) | Edit a DDNet special-tile grid; same indexing/bounds rules. |
+| `NewQuad(cx, cy, w, h int) Quad`                  | Axis-aligned quad in tile units; white corners, unit texcoords.  |
+| `(*Map).AddImage(name string, rgba *image.NRGBA) int` | Append an embedded image; returns its index for `ImageID`/`QuadImageID`. |
+| `(*Map).AddExternalImage(name string, w, h int) int`  | Append an external (mapres) image reference; returns its index.  |
 
 ```go
 m := twmap.NewMap(twmap.MapVersion06)
