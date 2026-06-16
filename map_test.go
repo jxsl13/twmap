@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // testMapFiles returns all .map files in testdata/.
@@ -253,5 +254,38 @@ func layerDetail(l Layer) string {
 		return fmt.Sprintf("sources=%d sound=%d", len(l.SoundSources), l.SoundID)
 	default:
 		return ""
+	}
+}
+
+func TestLayerPresenceHelpers(t *testing.T) {
+	l := Layer{ImageID: -1, ColorEnv: -1, QuadImageID: -1, SoundID: -1}
+	if l.HasImage() || l.HasColorEnv() || l.HasQuadImage() || l.HasSound() {
+		t.Fatalf("expected all helper methods to report false for unset ids")
+	}
+
+	l.ImageID = 0
+	l.ColorEnv = 2
+	l.QuadImageID = 1
+	l.SoundID = 3
+	if !l.HasImage() || !l.HasColorEnv() || !l.HasQuadImage() || !l.HasSound() {
+		t.Fatalf("expected all helper methods to report true for set ids")
+	}
+}
+
+func TestNativeDurationConversions(t *testing.T) {
+	if got := millisToDuration(1500); got != 1500*time.Millisecond {
+		t.Fatalf("millisToDuration: got %v", got)
+	}
+	if got := secondsToDuration(12); got != 12*time.Second {
+		t.Fatalf("secondsToDuration: got %v", got)
+	}
+	if got := durationToMillisInt32(2750 * time.Millisecond); got != 2750 {
+		t.Fatalf("durationToMillisInt32: got %d", got)
+	}
+	if got := durationToSecondsInt32(9 * time.Second); got != 9 {
+		t.Fatalf("durationToSecondsInt32: got %d", got)
+	}
+	if EnvelopeChannelsColor != 4 || ShapeTypeCircle != 1 {
+		t.Fatalf("unexpected typed constants: channels=%d shape=%d", EnvelopeChannelsColor, ShapeTypeCircle)
 	}
 }

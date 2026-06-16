@@ -3,6 +3,7 @@ package twmap
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"image/color"
 	"io"
 	"slices"
@@ -31,7 +32,9 @@ func (m *Map) Write(w io.Writer) error {
 	m.writeSounds(b)
 
 	// ── groups & layers ──────────────────────────────────────────────────
-	m.writeGroupsAndLayers(b)
+	if err := m.writeGroupsAndLayers(b); err != nil {
+		return err
+	}
 
 	return b.finish(w)
 }
@@ -195,7 +198,7 @@ func (m *Map) writeEnvelopes(b *datafileBuilder) {
 	for i, env := range m.Envelopes {
 		startPoint := pointOffset
 		for _, pt := range env.Points {
-			allPoints = append(allPoints, pt.Time, int32(pt.CurveType),
+			allPoints = append(allPoints, durationToMillisInt32(pt.Time), int32(pt.CurveType),
 				pt.Values[0], pt.Values[1], pt.Values[2], pt.Values[3])
 		}
 		pointOffset += len(env.Points)
@@ -203,7 +206,7 @@ func (m *Map) writeEnvelopes(b *datafileBuilder) {
 		// Envelope item: [version, channels, startPoint, numPoints, name[8], synchronized]
 		data := make([]int32, 13)
 		data[0] = 2 // version (v2 = synchronized)
-		data[1] = env.Channels
+		data[1] = int32(env.Channels)
 		data[2] = int32(startPoint)
 		data[3] = int32(len(env.Points))
 		nameI32 := encodeI32String(env.Name, 8)
@@ -239,12 +242,14 @@ func (m *Map) writeSounds(b *datafileBuilder) {
 
 // ── group & layer writing ────────────────────────────────────────────────────
 
-func (m *Map) writeGroupsAndLayers(b *datafileBuilder) {
+func (m *Map) writeGroupsAndLayers(b *datafileBuilder) error {
 	layerID := uint16(0)
 	for gi, g := range m.Groups {
 		startLayer := layerID
-		for _, l := range g.Layers {
-			writeLayer(b, &l, layerID)
+		for li, l := range g.Layers {
+			if err := writeLayer(b, &l, layerID); err != nil {
+				return fmt.Errorf("group %d layer %d: %w", gi, li, err)
+			}
 			layerID++
 		}
 
@@ -270,20 +275,21 @@ func (m *Map) writeGroupsAndLayers(b *datafileBuilder) {
 
 		b.addItem(mapItemTypeGroup, uint16(gi), gData)
 	}
+	return nil
 }
 
-func writeLayer(b *datafileBuilder, l *Layer, id uint16) {
+func writeLayer(b *datafileBuilder, l *Layer, id uint16) error {
 	switch l.Kind {
 	case LayerKindQuads:
-		writeQuadsLayer(b, l, id)
+		return writeQuadsLayer(b, l, id)
 	case LayerKindSounds:
-		writeSoundsLayer(b, l, id)
+		return writeSoundsLayer(b, l, id)
 	default:
-		writeTilemapLayer(b, l, id)
+		return writeTilemapLayer(b, l, id)
 	}
 }
 
-func writeTilemapLayer(b *datafileBuilder, l *Layer, id uint16) {
+func writeTilemapLayer(b *datafileBuilder, l *Layer, id uint16) error {
 	tileFlags := tileLayerFlags(l.Kind)
 
 	// Encode base tile data
@@ -312,7 +318,7 @@ func writeTilemapLayer(b *datafileBuilder, l *Layer, id uint16) {
 	data[9] = int32(l.ColorB)
 	data[10] = int32(l.ColorA)
 	data[11] = l.ColorEnv
-	data[12] = l.ColorEnvOffset
+	data[12] = durationToMillisInt32(l.ColorEnvOffset)
 	data[13] = int32(l.ImageID)
 	data[14] = tileDataIdx
 
@@ -352,12 +358,17 @@ func writeTilemapLayer(b *datafileBuilder, l *Layer, id uint16) {
 	}
 
 	b.addItem(mapItemTypeLayer, id, data)
+	return nil
 }
 
-func writeQuadsLayer(b *datafileBuilder, l *Layer, id uint16) {
+func writeQuadsLayer(b *datafileBuilder, l *Layer, id uint16) error {
 	quadDataIdx := int32(-1)
 	if len(l.Quads) > 0 {
-		quadDataIdx = b.addData(encodeQuads(l.Quads))
+		quadData, err := encodeQuads(l.Quads)
+		if err != nil {
+			return err
+		}
+		quadDataIdx = b.addData(quadData)
 	}
 
 	// [layerVersion, type, flags, quadsVersion, numQuads, data, image, name[3]]
@@ -375,12 +386,17 @@ func writeQuadsLayer(b *datafileBuilder, l *Layer, id uint16) {
 	copy(data[7:10], nameI32)
 
 	b.addItem(mapItemTypeLayer, id, data)
+	return nil
 }
 
-func writeSoundsLayer(b *datafileBuilder, l *Layer, id uint16) {
+func writeSoundsLayer(b *datafileBuilder, l *Layer, id uint16) error {
 	srcDataIdx := int32(-1)
 	if len(l.SoundSources) > 0 {
-		srcDataIdx = b.addData(encodeSoundSources(l.SoundSources))
+		srcData, err := encodeSoundSources(l.SoundSources)
+		if err != nil {
+			return err
+		}
+		srcDataIdx = b.addData(srcData)
 	}
 
 	// [layerVersion, type, flags, soundsVersion, numSources, data, sound, name[3]]
@@ -398,6 +414,7 @@ func writeSoundsLayer(b *datafileBuilder, l *Layer, id uint16) {
 	copy(data[7:10], nameI32)
 
 	b.addItem(mapItemTypeLayer, id, data)
+	return nil
 }
 
 // ── encoding helpers ─────────────────────────────────────────────────────────
@@ -478,12 +495,14 @@ func encodeTuneTiles(tiles []TuneTile) []byte {
 	return buf
 }
 
-func encodeQuads(quads []Quad) []byte {
+func encodeQuads(quads []Quad) ([]byte, error) {
 	buf := make([]byte, len(quads)*quadBinarySize)
 	for qi, q := range quads {
 		off := qi * quadBinarySize
 		for i := range 5 {
-			writePointBytes(buf[off:], q.Points[i])
+			if err := writePointBytes(buf[off:], q.Points[i]); err != nil {
+				return nil, fmt.Errorf("quad %d point %d: %w", qi, i, err)
+			}
 			off += 8
 		}
 		for i := range 4 {
@@ -491,22 +510,26 @@ func encodeQuads(quads []Quad) []byte {
 			off += 16
 		}
 		for i := range 4 {
-			writeTexCoordBytes(buf[off:], q.TexCoords[i])
+			if err := writeTexCoordBytes(buf[off:], q.TexCoords[i]); err != nil {
+				return nil, fmt.Errorf("quad %d texcoord %d: %w", qi, i, err)
+			}
 			off += 8
 		}
 		writeI32Bytes(buf[off:], q.PosEnv)
-		writeI32Bytes(buf[off+4:], q.PosEnvOffset)
+		writeI32Bytes(buf[off+4:], durationToMillisInt32(q.PosEnvOffset))
 		writeI32Bytes(buf[off+8:], q.ColorEnv)
-		writeI32Bytes(buf[off+12:], q.ColorEnvOffset)
+		writeI32Bytes(buf[off+12:], durationToMillisInt32(q.ColorEnvOffset))
 	}
-	return buf
+	return buf, nil
 }
 
-func encodeSoundSources(sources []SoundSource) []byte {
+func encodeSoundSources(sources []SoundSource) ([]byte, error) {
 	buf := make([]byte, len(sources)*soundSourceSize)
 	for i, s := range sources {
 		off := i * soundSourceSize
-		writePointBytes(buf[off:], s.Position)
+		if err := writePointBytes(buf[off:], s.Position); err != nil {
+			return nil, fmt.Errorf("sound source %d position: %w", i, err)
+		}
 		loopV := int32(0)
 		if s.Loop {
 			loopV = 1
@@ -517,31 +540,56 @@ func encodeSoundSources(sources []SoundSource) []byte {
 		}
 		writeI32Bytes(buf[off+8:], loopV)
 		writeI32Bytes(buf[off+12:], panV)
-		writeI32Bytes(buf[off+16:], s.Delay)
+		writeI32Bytes(buf[off+16:], durationToSecondsInt32(s.Delay))
 		writeI32Bytes(buf[off+20:], int32(s.Falloff))
 		writeI32Bytes(buf[off+24:], s.PosEnv)
-		writeI32Bytes(buf[off+28:], s.PosEnvOffset)
+		writeI32Bytes(buf[off+28:], durationToMillisInt32(s.PosEnvOffset))
 		writeI32Bytes(buf[off+32:], s.SoundEnv)
-		writeI32Bytes(buf[off+36:], s.SoundEnvOffset)
-		writeI32Bytes(buf[off+40:], s.ShapeType)
+		writeI32Bytes(buf[off+36:], durationToMillisInt32(s.SoundEnvOffset))
+		writeI32Bytes(buf[off+40:], int32(s.ShapeType))
 		writeI32Bytes(buf[off+44:], s.ShapeWidth)
 		writeI32Bytes(buf[off+48:], s.ShapeHeight)
 	}
-	return buf
+	return buf, nil
 }
 
-func writePointBytes(buf []byte, p Point) {
-	x := int32(p.X * 32768.0)
-	y := int32(p.Y * 32768.0)
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(x))
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(y))
+func checkedInt32(v int) (int32, error) {
+	const (
+		minInt32Value = -1 << 31
+		maxInt32Value = 1<<31 - 1
+	)
+	if v < minInt32Value || v > maxInt32Value {
+		return 0, fmt.Errorf("raw fixed-point value %d out of int32 range", v)
+	}
+	return int32(v), nil
 }
 
-func writeTexCoordBytes(buf []byte, p Point) {
-	x := int32(p.X * 1024.0)
-	y := int32(p.Y * 1024.0)
+func writePointBytes(buf []byte, p Point) error {
+	x, err := checkedInt32(p.X)
+	if err != nil {
+		return fmt.Errorf("x coordinate: %w", err)
+	}
+	y, err := checkedInt32(p.Y)
+	if err != nil {
+		return fmt.Errorf("y coordinate: %w", err)
+	}
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(x))
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(y))
+	return nil
+	}
+
+func writeTexCoordBytes(buf []byte, p Point) error {
+	x, err := checkedInt32(p.X)
+	if err != nil {
+		return fmt.Errorf("x texture coordinate: %w", err)
+	}
+	y, err := checkedInt32(p.Y)
+	if err != nil {
+		return fmt.Errorf("y texture coordinate: %w", err)
+	}
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(x))
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(y))
+	return nil
 }
 
 func writeColorBytes(buf []byte, c color.NRGBA) {

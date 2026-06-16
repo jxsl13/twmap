@@ -196,6 +196,39 @@ func ExampleParse_iterateLayers() {
 	}
 }
 
+// ExampleNewMap demonstrates building a multi-layer map from scratch with
+// the builder helpers, then serialising it to the Teeworlds datafile format.
+func ExampleNewMap() {
+	m := twmap.NewMap(twmap.MapVersion06)
+	m.Info.Author = "me"
+
+	// A group holds layers and shares offset/parallax (defaults to 100/100).
+	g := m.AddGroup(twmap.NewGroup("Game"))
+
+	// Background tile layer, filled with a solid tile.
+	bg := g.AddLayer(twmap.NewTileLayer("bg", 20, 10))
+	bg.Fill(twmap.Tile{ID: twmap.TileSolid})
+
+	// Game (physics) layer with a couple of solid tiles.
+	game := g.AddLayer(twmap.NewGameLayer(20, 10))
+	game.SetTile(0, 9, twmap.Tile{ID: twmap.TileSolid})
+	game.SetTile(19, 9, twmap.Tile{ID: twmap.TileSolid})
+
+	var buf bytes.Buffer
+	if err := m.Write(&buf); err != nil {
+		log.Fatal(err)
+	}
+
+	// Re-parse to confirm the built map is well-formed.
+	out, err := twmap.Parse(&buf)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("author=%s groups=%d layers=%d\n",
+		out.Info.Author, len(out.Groups), len(out.Groups[0].Layers))
+	// Output: author=me groups=1 layers=2
+}
+
 // ExampleGroup_IsPhysicsGroup shows how to find the physics group.
 func ExampleGroup_IsPhysicsGroup() {
 	f, err := os.Open("testdata/example.map")
